@@ -6,6 +6,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app.main import app
+from app.rag.embeddings.embedder import DailyQuotaExhaustedError
 
 
 @pytest.fixture
@@ -64,6 +65,24 @@ def test_ingest_authorized_succeeds(mock_ingest, client: TestClient):
     assert r.status_code == 200
     assert r.json()["status"] == "ingested"
     assert r.json()["chunk_count"] == 2
+
+
+@patch("app.api.routes.rag.ingest_document")
+def test_ingest_returns_503_on_daily_quota_exhaustion(mock_ingest, client: TestClient):
+    mock_ingest.side_effect = DailyQuotaExhaustedError("Gemini daily embedding quota exhausted")
+    with patch.dict("os.environ", {"INGESTION_API_KEY": "secret-token"}):
+        r = client.post(
+            "/api/rag/ingest",
+            headers={"Authorization": "Bearer secret-token"},
+            json={
+                "source_key": "file:dls.md",
+                "title": "DLS Rules",
+                "text": "Duckworth-Lewis-Stern calculates revised targets.",
+                "doc_type": "cricket_rule",
+            },
+        )
+    assert r.status_code == 503
+    assert "daily embedding quota exhausted" in r.json()["detail"].lower()
 
 
 @patch("app.api.routes.rag.hybrid_retrieve")

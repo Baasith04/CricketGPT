@@ -6,7 +6,12 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from app.database.connection import get_db_connection
-from app.rag.embeddings.embedder import get_embedding_service, retry_with_backoff
+from app.rag.embeddings.embedder import (
+    DailyQuotaExhaustedError,
+    get_embedding_service,
+    is_daily_quota_exhausted_error,
+    retry_with_backoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +47,20 @@ def hybrid_retrieve(
         raise ValueError("similarity_threshold must be between 0.0 and 1.0.")
 
     svc = embedder or get_embedding_service()
-    query_vector = svc.embed_query(query.strip())
-    vec_literal = _format_pgvector_literal(query_vector)
+    query_vector: Optional[List[float]] = None
+    try:
+        query_vector = svc.embed_query(query.strip())
+    except Exception as exc:
+        if isinstance(exc, DailyQuotaExhaustedError) or is_daily_quota_exhausted_error(exc):
+            logger.warning(
+                "Gemini daily embedding quota exhausted during query embedding (%s); "
+                "falling back to PostgreSQL keyword (tsvector) retrieval.",
+                exc,
+            )
+        else:
+            raise
+
+    vec_literal = _format_pgvector_literal(query_vector) if query_vector is not None else None
 
     filter_clauses: List[str] = ["c.embedding IS NOT NULL"]
     filter_params: List[Any] = []
@@ -74,6 +91,29 @@ def hybrid_retrieve(
 
     where_sql = ("WHERE " + " AND ".join(filter_clauses)) if filter_clauses else ""
 
+    if vec_literal is not None:
+        vector_sim_sql = "GREATEST(0.0, 1.0 - (c.embedding <=> %s::vector))"
+        hybrid_expr_sql = "%s * vector_similarity + %s * LEAST(keyword_score, 1.0)"
+        score_filter_sql = "WHERE vector_similarity >= %s OR keyword_score >= 0.05"
+        params: List[Any] = [
+            vec_literal,
+            query.strip(),
+            *filter_params,
+            vector_weight,
+            keyword_weight,
+            similarity_threshold,
+            top_k,
+        ]
+    else:
+        vector_sim_sql = "0.0::float8"
+        hybrid_expr_sql = "LEAST(keyword_score, 1.0)"
+        score_filter_sql = "WHERE keyword_score > 0.0"
+        params = [
+            query.strip(),
+            *filter_params,
+            top_k,
+        ]
+
     sql = f"""
         WITH scored AS (
             SELECT
@@ -91,7 +131,7 @@ def hybrid_retrieve(
                 c.chunk_index,
                 c.chunk_text,
                 c.metadata,
-                GREATEST(0.0, 1.0 - (c.embedding <=> %s::vector)) AS vector_similarity,
+                {vector_sim_sql} AS vector_similarity,
                 COALESCE(
                     ts_rank_cd(
                         c.search_tsv,
@@ -122,27 +162,15 @@ def hybrid_retrieve(
             ROUND(keyword_score::numeric, 4) AS keyword_score,
             ROUND(
                 (
-                    %s * vector_similarity
-                    + %s * LEAST(keyword_score, 1.0)
+                    {hybrid_expr_sql}
                 )::numeric,
                 4
             ) AS hybrid_score
         FROM scored
-        WHERE vector_similarity >= %s
-           OR keyword_score >= 0.05
+        {score_filter_sql}
         ORDER BY hybrid_score DESC, vector_similarity DESC
         LIMIT %s;
     """
-
-    params: List[Any] = [
-        vec_literal,
-        query.strip(),
-        *filter_params,
-        vector_weight,
-        keyword_weight,
-        similarity_threshold,
-        top_k,
-    ]
 
     def _run_query() -> List[Dict[str, Any]]:
         with get_db_connection() as conn:

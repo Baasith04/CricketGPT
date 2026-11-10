@@ -10,7 +10,7 @@ Key concepts:
 
 from starlette.testclient import TestClient
 
-from app.main import app
+from app.main import app, build_cors_config, create_app, parse_cors_origins
 
 
 # ---------------------------------------------------------------------------
@@ -68,3 +68,36 @@ def test_app_info_returns_correct_metadata(client: TestClient):
     assert data["version"] == "0.1.0"
     assert data["environment"] == "development"
     assert len(data["description"]) > 0
+
+
+def test_cors_allows_unconfigured_api_usage(monkeypatch):
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "")
+    cfg = build_cors_config()
+    assert cfg["allow_origins"] == []
+    assert cfg["allow_credentials"] is False
+
+    test_app = create_app()
+    with TestClient(test_app) as c:
+        resp = c.get("/health")
+        assert resp.status_code == 200
+        assert "access-control-allow-origin" not in resp.headers
+
+
+def test_cors_supports_comma_separated_origins_and_blocks_wildcard_credentials(monkeypatch):
+    origins = parse_cors_origins("https://app.cricketgpt.in, https://preview.cricketgpt.in ")
+    assert origins == ["https://app.cricketgpt.in", "https://preview.cricketgpt.in"]
+
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.cricketgpt.in, https://preview.cricketgpt.in")
+    cfg = build_cors_config()
+    assert cfg["allow_credentials"] is True
+
+    test_app = create_app()
+    with TestClient(test_app) as c:
+        resp = c.get("/health", headers={"Origin": "https://preview.cricketgpt.in"})
+        assert resp.status_code == 200
+        assert resp.headers.get("access-control-allow-origin") == "https://preview.cricketgpt.in"
+        assert resp.headers.get("access-control-allow-credentials") == "true"
+
+    wildcard_cfg = build_cors_config("*")
+    assert wildcard_cfg["allow_origins"] == ["*"]
+    assert wildcard_cfg["allow_credentials"] is False

@@ -16,7 +16,14 @@ from app.rag.chunking.chunker import (
     extract_text_from_file,
     prepare_document_chunks,
 )
-from app.rag.embeddings.embedder import get_embedding_service, retry_with_backoff
+from app.rag.embeddings.embedder import (
+    DailyQuotaExhaustedError,
+    EMBEDDING_DIMENSION,
+    REQUIRED_EMBEDDING_MODEL,
+    get_embedding_service,
+    is_daily_quota_exhausted_error,
+    retry_with_backoff,
+)
 from app.rag.retrieval.hybrid_retriever import (
     _format_pgvector_literal,
     hybrid_retrieve,
@@ -139,6 +146,20 @@ def reembed_existing_chunks(batch_size: int = 32, embedder=None) -> Dict[str, An
     }
 
 
+def _resolve_embedding_provenance(embedder=None) -> tuple[str, int]:
+    """Return validated (embedding_model, embedding_dimension) provenance metadata."""
+    svc = embedder if embedder is not None else get_embedding_service()
+    model_name = getattr(svc, "model_name", None)
+    dimension = getattr(svc, "dimension", None)
+    if not isinstance(model_name, str) or not model_name.strip():
+        model_name = REQUIRED_EMBEDDING_MODEL
+    else:
+        model_name = model_name.strip()
+    if not isinstance(dimension, int) or isinstance(dimension, bool) or dimension <= 0:
+        dimension = EMBEDDING_DIMENSION
+    return model_name, dimension
+
+
 def ingest_document(
     source_key: str,
     title: str,
@@ -191,6 +212,11 @@ def ingest_document(
             "chunk_count": existing[2],
         }
 
+    embedding_model, embedding_dimension = _resolve_embedding_provenance(embedder)
+    doc_meta = dict(extra_metadata or {})
+    doc_meta["embedding_model"] = embedding_model
+    doc_meta["embedding_dimension"] = embedding_dimension
+
     chunks = prepare_document_chunks(
         text=text,
         source_key=source_key.strip(),
@@ -202,7 +228,7 @@ def ingest_document(
         players=players,
         source_path=source_path,
         source_url=source_url,
-        extra_metadata=extra_metadata,
+        extra_metadata=doc_meta,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
@@ -212,6 +238,12 @@ def ingest_document(
             raise ValueError(
                 f"Expected {len(chunks)} precomputed embeddings, got {len(precomputed_embeddings)}."
             )
+        for idx, vec in enumerate(precomputed_embeddings):
+            if len(vec) != embedding_dimension:
+                raise ValueError(
+                    f"Precomputed embedding dimension mismatch at chunk {idx}: "
+                    f"expected {embedding_dimension}, got {len(vec)}."
+                )
         embeddings = precomputed_embeddings
     else:
         svc = embedder or get_embedding_service()
@@ -222,7 +254,6 @@ def ingest_document(
 
     teams_list = list(teams or [])
     players_list = list(players or [])
-    doc_meta = dict(extra_metadata or {})
 
     def _write_tx() -> int:
         with get_db_connection() as conn:
@@ -372,6 +403,14 @@ def ingest_directory(
             counts[outcome["status"]] += 1
             results.append(outcome)
         except Exception as exc:
+            if is_daily_quota_exhausted_error(exc):
+                logger.error(
+                    "Gemini daily embedding quota exhausted while ingesting %s; stopping directory ingestion.",
+                    rel_key,
+                )
+                raise DailyQuotaExhaustedError(
+                    f"Gemini daily embedding quota exhausted while ingesting '{rel_key}': {exc}"
+                ) from exc
             counts["failed"] += 1
             errors.append({"file": rel_key, "error": str(exc)})
             logger.error("Failed ingesting %s: %s", rel_key, exc)
@@ -539,6 +578,8 @@ def ingest_db_match_summaries(
     errors: List[Dict[str, Any]] = []
     prepared_docs: List[Dict[str, Any]] = []
 
+    embedding_model, embedding_dimension = _resolve_embedding_provenance(embedder)
+
     for row in rows:
         match_id = row["match_id"]
         season = row["season"]
@@ -606,6 +647,8 @@ def ingest_db_match_summaries(
                 "match_number": row.get("match_number"),
                 "is_season_final": is_final,
                 "generated_from": "cricsheet_sql",
+                "embedding_model": embedding_model,
+                "embedding_dimension": embedding_dimension,
             },
         }
         prepared_docs.append(doc_payload)
@@ -657,41 +700,45 @@ def ingest_db_match_summaries(
                     task_type="RETRIEVAL_DOCUMENT",
                 )
             except Exception as batch_exc:
+                if is_daily_quota_exhausted_error(batch_exc):
+                    logger.error(
+                        "Gemini daily embedding quota exhausted during batch embedding; "
+                        "stopping immediately without per-document fallback."
+                    )
+                    raise DailyQuotaExhaustedError(str(batch_exc)) from batch_exc
                 logger.warning(
                     "Batch Gemini embedding failed (%s); falling back to per-document ingestion.",
                     batch_exc,
                 )
                 batch_vectors = None
 
-        for d, (s_idx, e_idx) in zip(docs_to_embed, chunk_slices):
-            pre_vecs = batch_vectors[s_idx:e_idx] if batch_vectors is not None else None
-            try:
-                outcome = ingest_document(
-                    **d,
-                    force=force,
-                    embedder=embedder,
-                    precomputed_embeddings=pre_vecs,
-                )
-                counts[outcome["status"]] += 1
-            except Exception as exc:
-                counts["failed"] += 1
-                failed_match_ids.append(d["match_id"])
-                errors.append({"match_id": d["match_id"], "error": str(exc)})
-                logger.error("Failed ingesting RAG match summary for match %s: %s", d["match_id"], exc)
+        doc_items = [
+            (d, batch_vectors[s_idx:e_idx] if batch_vectors is not None else None)
+            for d, (s_idx, e_idx) in zip(docs_to_embed, chunk_slices)
+        ]
     else:
-        for d in prepared_docs:
-            try:
-                outcome = ingest_document(
-                    **d,
-                    force=force,
-                    embedder=embedder,
+        doc_items = [(d, None) for d in prepared_docs]
+
+    for d, pre_vecs in doc_items:
+        try:
+            outcome = ingest_document(
+                **d,
+                force=force,
+                embedder=embedder,
+                precomputed_embeddings=pre_vecs,
+            )
+            counts[outcome["status"]] += 1
+        except Exception as exc:
+            if is_daily_quota_exhausted_error(exc):
+                logger.error(
+                    "Gemini daily embedding quota exhausted at match %s; stopping immediately.",
+                    d["match_id"],
                 )
-                counts[outcome["status"]] += 1
-            except Exception as exc:
-                counts["failed"] += 1
-                failed_match_ids.append(d["match_id"])
-                errors.append({"match_id": d["match_id"], "error": str(exc)})
-                logger.error("Failed ingesting RAG match summary for match %s: %s", d["match_id"], exc)
+                raise DailyQuotaExhaustedError(str(exc)) from exc
+            counts["failed"] += 1
+            failed_match_ids.append(d["match_id"])
+            errors.append({"match_id": d["match_id"], "error": str(exc)})
+            logger.error("Failed ingesting RAG match summary for match %s: %s", d["match_id"], exc)
 
     return {
         "processed": len(rows),
@@ -699,6 +746,26 @@ def ingest_db_match_summaries(
         "failed_match_ids": failed_match_ids,
         "errors": errors,
     }
+
+
+def _build_backfill_resume_command(
+    batch_size: int = 50,
+    seasons: Optional[List[str]] = None,
+    max_matches: Optional[int] = None,
+    force: bool = False,
+) -> str:
+    """Build exact CLI command to resume missing historical RAG backfill."""
+    parts = ["python", "scripts/ingest_rag.py", "--backfill-rag"]
+    if batch_size != 50:
+        parts.extend(["--batch-size", str(batch_size)])
+    if seasons:
+        parts.append("--seasons")
+        parts.extend(str(s) for s in seasons)
+    if max_matches is not None:
+        parts.extend(["--max-matches", str(max_matches)])
+    if force:
+        parts.append("--force")
+    return " ".join(parts)
 
 
 def backfill_historical_match_rag(
@@ -717,6 +784,7 @@ def backfill_historical_match_rag(
     Resumable by design: when `include_existing=False` (default), it queries only
     matches lacking `db:match:<match_id>` so re-running after an interruption resumes
     automatically without regenerating or deleting existing RAG documents.
+    Stops immediately on Gemini daily quota exhaustion without repeated retries.
     """
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1.")
@@ -759,31 +827,68 @@ def backfill_historical_match_rag(
     if max_matches is not None and max_matches >= 0:
         target_ids = target_ids[:max_matches]
 
+    resume_cmd = _build_backfill_resume_command(
+        batch_size=batch_size,
+        seasons=seasons,
+        max_matches=max_matches,
+        force=force,
+    )
+    active_model = embedder.model_name if embedder is not None else REQUIRED_EMBEDDING_MODEL
+
     if dry_run:
         return {
             "dry_run": True,
+            "embedding_model": active_model,
             "total_sql_matches": total_sql_matches,
             "already_covered": already_covered,
             "missing_matches": max(0, total_sql_matches - already_covered),
             "target_count": len(target_ids),
             "batch_size": batch_size,
             "sample_target_ids": target_ids[:10],
+            "resume_command": resume_cmd if target_ids else None,
         }
 
     totals = {"processed": 0, "ingested": 0, "updated": 0, "unchanged": 0, "failed": 0}
     all_failed_ids: List[int] = []
     all_errors: List[Dict[str, Any]] = []
+    quota_exhausted = False
+    stopped_reason: Optional[str] = None
+    batches_executed = 0
 
     total_batches = (len(target_ids) + batch_size - 1) // batch_size if target_ids else 0
     for idx in range(0, len(target_ids), batch_size):
         batch_num = (idx // batch_size) + 1
         batch_ids = target_ids[idx : idx + batch_size]
-        res = ingest_db_match_summaries(
-            match_ids=batch_ids,
-            force=force,
-            embedder=embedder,
-            batch_embed=True,
-        )
+        try:
+            res = ingest_db_match_summaries(
+                match_ids=batch_ids,
+                force=force,
+                embedder=embedder,
+                batch_embed=True,
+            )
+        except Exception as exc:
+            if is_daily_quota_exhausted_error(exc):
+                quota_exhausted = True
+                stopped_reason = "daily_quota_exhausted"
+                all_failed_ids.extend(batch_ids)
+                all_errors.append(
+                    {
+                        "batch": batch_num,
+                        "match_ids": list(batch_ids),
+                        "reason": "daily_quota_exhausted",
+                        "error": str(exc),
+                    }
+                )
+                logger.error(
+                    "Backfill batch %d/%d stopped immediately on Gemini daily quota exhaustion: %s",
+                    batch_num,
+                    total_batches,
+                    exc,
+                )
+                break
+            raise
+
+        batches_executed += 1
         totals["processed"] += res["processed"]
         for key in ("ingested", "updated", "unchanged", "failed"):
             totals[key] += res["counts"][key]
@@ -799,13 +904,26 @@ def backfill_historical_match_rag(
             res["counts"]["unchanged"],
             res["counts"]["failed"],
         )
+        if res.get("quota_exhausted"):
+            quota_exhausted = True
+            stopped_reason = "daily_quota_exhausted"
+            break
+
+    completed_count = totals["ingested"] + totals["updated"] + totals["unchanged"]
+    remaining_matches = max(0, len(target_ids) - completed_count)
 
     return {
         "dry_run": False,
+        "status": "stopped_quota_exhausted" if quota_exhausted else "completed",
+        "quota_exhausted": quota_exhausted,
+        "stopped_reason": stopped_reason,
+        "embedding_model": active_model,
         "total_sql_matches": total_sql_matches,
         "previously_covered": already_covered,
         "target_count": len(target_ids),
-        "batches_executed": total_batches,
+        "batches_executed": batches_executed,
+        "remaining_matches": remaining_matches,
+        "resume_command": resume_cmd if (quota_exhausted or remaining_matches > 0) else None,
         "counts": totals,
         "failed_match_ids": all_failed_ids,
         "errors": all_errors,

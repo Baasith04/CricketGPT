@@ -1,9 +1,11 @@
 
 import logging
 import os
+import re
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from openai import OpenAI
 
 load_dotenv()
@@ -30,6 +32,28 @@ def _is_placeholder(value: str) -> bool:
     return any(lower.startswith(p) for p in _PLACEHOLDER_PREFIXES)
 
 
+def _get_ai_timeout_seconds() -> int:
+    """Parse AI_TIMEOUT in seconds, falling back safely to 30s."""
+    raw = os.getenv("AI_TIMEOUT", "30").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Invalid AI_TIMEOUT '%s'; defaulting to 30s.", raw)
+        return 30
+
+
+def _sanitize_provider_error(message: str) -> str:
+    """Mask configured API keys and auth tokens from provider exception text."""
+    sanitized = str(message or "")
+    for env_key in ("GEMINI_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY", "NVIDIA_API_KEY"):
+        secret = os.getenv(env_key, "").strip()
+        if secret and not _is_placeholder(secret):
+            sanitized = sanitized.replace(secret, "[REDACTED]")
+    sanitized = re.sub(r"(?i)(bearer\s+)\S+", r"\1[REDACTED]", sanitized)
+    sanitized = re.sub(r"(?i)(api[_-]?key\s*[=:]\s*)\S+", r"\1[REDACTED]", sanitized)
+    return sanitized
+
+
 def _generate_gemini(prompt: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     model = os.getenv("GEMINI_MODEL")
@@ -43,7 +67,11 @@ def _generate_gemini(prompt: str) -> str:
             "Update GEMINI_API_KEY and GEMINI_MODEL in your .env file."
         )
 
-    with genai.Client(api_key=api_key) as client:
+    timeout_ms = max(1000, _get_ai_timeout_seconds() * 1000)
+    with genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=timeout_ms),
+    ) as client:
         response = client.models.generate_content(
             model=model,
             contents=prompt,
@@ -74,7 +102,7 @@ def _generate_openai_compatible(provider: str, prompt: str) -> str:
     client = OpenAI(
         api_key=api_key,
         base_url=PROVIDER_URLS[provider],
-        timeout=int(os.getenv("AI_TIMEOUT", "30")),
+        timeout=_get_ai_timeout_seconds(),
         max_retries=1,
     )
 
@@ -142,7 +170,7 @@ def generate_response(prompt: str) -> str:
                 "AI provider failed: %s (%s: %s)",
                 provider,
                 type(exc).__name__,
-                str(exc)[:120],
+                _sanitize_provider_error(str(exc))[:120],
             )
             failures.append(provider)
 

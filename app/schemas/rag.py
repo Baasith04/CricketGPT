@@ -17,14 +17,14 @@ DocTypeLiteral = Literal[
 class RagIngestRequest(BaseModel):
     source_key: str = Field(..., min_length=1, max_length=255)
     title: str = Field(..., min_length=1, max_length=300)
-    text: str = Field(..., min_length=10)
+    text: str = Field(..., min_length=10, max_length=50000)
     doc_type: DocTypeLiteral = "general_knowledge"
     season: Optional[str] = Field(default=None, max_length=15)
     match_id: Optional[int] = Field(default=None, ge=1)
     teams: List[str] = Field(default_factory=list)
     players: List[str] = Field(default_factory=list)
-    source_path: Optional[str] = None
-    source_url: Optional[str] = None
+    source_path: Optional[str] = Field(default=None, max_length=500)
+    source_url: Optional[str] = Field(default=None, max_length=500)
     extra_metadata: Dict[str, Any] = Field(default_factory=dict)
     chunk_size: int = Field(default=700, ge=100, le=4000)
     chunk_overlap: int = Field(default=100, ge=0, le=500)
@@ -39,14 +39,14 @@ class RagIngestResponse(BaseModel):
 
 
 class RagDirectoryIngestRequest(BaseModel):
-    directory: str = Field(..., min_length=1)
+    directory: str = Field(..., min_length=1, max_length=500)
     default_doc_type: DocTypeLiteral = "general_knowledge"
     force: bool = False
 
 
 class RagMatchSummariesIngestRequest(BaseModel):
     seasons: Optional[List[str]] = None
-    match_ids: Optional[List[int]] = None
+    match_ids: Optional[List[int]] = Field(default=None, max_length=500)
     limit: int = Field(default=100, ge=1, le=2000)
     force: bool = False
 

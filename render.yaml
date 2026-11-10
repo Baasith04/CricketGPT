@@ -14,9 +14,9 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: AI_PRIMARY_PROVIDER
-        value: gemini
+        value: groq
       - key: AI_PROVIDER_ORDER
-        value: gemini,groq,mistral,nvidia
+        value: groq,gemini,mistral,nvidia
       - key: AI_TIMEOUT
         value: "30"
       - key: AI_MAX_TOKENS
@@ -47,6 +47,20 @@ services:
         value: "2024-03-01"
       - key: GEMINI_KNOWLEDGE_CUTOFF_SEASON
         value: "2023"
+      - key: CORS_ALLOW_ORIGINS
+        value: ""
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_STORAGE_URI
+        value: ""
+      - key: RATE_LIMIT_CHAT
+        value: "20/minute"
+      - key: RATE_LIMIT_RAG_SEARCH
+        value: "60/minute"
+      - key: RATE_LIMIT_RAG_INGEST
+        value: "10/minute"
+      - key: TRUSTED_PROXY_CIDRS
+        value: ""
 
   - type: cron
     name: cricketgpt-cricsheet-sync
@@ -61,6 +75,8 @@ services:
         value: "3.11.9"
       - key: DATABASE_URL
         sync: false
+      - key: AI_TIMEOUT
+        value: "30"
       - key: GEMINI_API_KEY
         sync: false
       - key: RAG_EMBEDDING_MODEL

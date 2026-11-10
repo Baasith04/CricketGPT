@@ -37,10 +37,19 @@ build/
 *.egg-info/
 *.egg
 
-# Generated validation reports
+# Generated validation and evaluation reports
 bulk_import_report.json
 scorecard_validation_report.json
 detailed_scorecard_validation_report.json
+evaluation/reports/
+
+# Local SQLite databases and logs
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.log
 
 # Local datasets (only if not intended for GitHub)
 dataset/

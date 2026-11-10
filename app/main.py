@@ -12,7 +12,11 @@ Key concepts:
 - Database health checks verify live connectivity without exposing credentials.
 """
 
+import os
+from typing import Any, Dict, List, Optional
+
 from fastapi import FastAPI, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from app.api.routes.chat import router as chat_router
@@ -71,118 +75,111 @@ class DatabaseErrorResponse(BaseModel):
     message: str
 
 
+def parse_cors_origins(raw_origins: Optional[str] = None) -> List[str]:
+    """Parse comma-separated allowed origins from CORS_ALLOW_ORIGINS."""
+    value = raw_origins if raw_origins is not None else os.getenv("CORS_ALLOW_ORIGINS", "")
+    return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+
+def build_cors_config(raw_origins: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Build CORSMiddleware configuration from CORS_ALLOW_ORIGINS.
+    Never enables allow_credentials alongside a wildcard ('*') origin.
+    """
+    origins = parse_cors_origins(raw_origins)
+    has_wildcard = "*" in origins
+    return {
+        "allow_origins": ["*"] if has_wildcard else origins,
+        "allow_credentials": bool(origins) and not has_wildcard,
+        "allow_methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Authorization", "Content-Type", "X-API-Key"],
+    }
+
+
+def create_app() -> FastAPI:
+    """Create and configure the CricketGPT FastAPI application."""
+    application = FastAPI(
+        title="CricketGPT",
+        description="AI-powered IPL cricket statistics and question-answering assistant.",
+        version="0.1.0",
+    )
+    cors_cfg = build_cors_config()
+    application.add_middleware(CORSMiddleware, **cors_cfg)
+    application.include_router(chat_router)
+    application.include_router(leaderboard_router)
+    application.include_router(matches_router)
+    application.include_router(players_router)
+    application.include_router(rag_router)
+    application.include_router(teams_router)
+
+    @application.get(
+        "/",
+        response_model=WelcomeResponse,
+        summary="Welcome",
+        tags=["General"],
+    )
+    def root() -> WelcomeResponse:
+        return WelcomeResponse(
+            message="Welcome to CricketGPT! Your AI-powered IPL cricket assistant.",
+            project="CricketGPT",
+        )
+
+    @application.get(
+        "/health",
+        response_model=HealthResponse,
+        summary="Service health check",
+        tags=["General"],
+    )
+    def health_check() -> HealthResponse:
+        return HealthResponse(
+            status="healthy",
+            service="CricketGPT",
+        )
+
+    @application.get(
+        "/api/info",
+        response_model=InfoResponse,
+        summary="Application info",
+        tags=["General"],
+    )
+    def app_info() -> InfoResponse:
+        return InfoResponse(
+            app_name="CricketGPT",
+            version="0.1.0",
+            environment="development",
+            description="AI-powered IPL cricket statistics and question-answering assistant.",
+        )
+
+    @application.get(
+        "/health/database",
+        response_model=DatabaseHealthResponse,
+        responses={
+            200: {"model": DatabaseHealthResponse, "description": "Database is reachable"},
+            503: {"model": DatabaseErrorResponse, "description": "Database connection failed"},
+        },
+        summary="Database health check",
+        tags=["Database"],
+    )
+    def database_health_check():
+        try:
+            result = check_database_connection()
+            return DatabaseHealthResponse(**result)
+        except (DatabaseConfigurationError, DatabaseConnectionError):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "Database connection failed"},
+            )
+        except Exception:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "Database connection failed"},
+            )
+
+    return application
+
+
 # ---------------------------------------------------------------------------
 # FastAPI Application Instance
 # ---------------------------------------------------------------------------
-# title, description, version appear in the Swagger UI header.
-# ---------------------------------------------------------------------------
 
-app = FastAPI(
-    title="CricketGPT",
-    description="AI-powered IPL cricket statistics and question-answering assistant.",
-    version="0.1.0",
-)
-app.include_router(chat_router)
-app.include_router(leaderboard_router)
-app.include_router(matches_router)
-app.include_router(players_router)
-app.include_router(rag_router)
-app.include_router(teams_router)
-
-
-# ---------------------------------------------------------------------------
-# API Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get(
-    "/",
-    response_model=WelcomeResponse,
-    summary="Welcome",
-    tags=["General"],
-)
-def root() -> WelcomeResponse:
-    """
-    Root endpoint — returns a CricketGPT welcome message.
-
-    This is the simplest possible endpoint:
-    - No input parameters.
-    - Returns a fixed JSON object.
-    - Useful to verify the server is running.
-    """
-    return WelcomeResponse(
-        message="Welcome to CricketGPT! Your AI-powered IPL cricket assistant.",
-        project="CricketGPT",
-    )
-
-
-@app.get(
-    "/health",
-    response_model=HealthResponse,
-    summary="Service health check",
-    tags=["General"],
-)
-def health_check() -> HealthResponse:
-    """
-    Service health check endpoint — confirms the web server is alive.
-
-    Used by:
-    - Developers during local testing.
-    - Deployment platforms (like Render) to verify process liveness.
-    - Does NOT depend on database availability (intentional design).
-    """
-    return HealthResponse(
-        status="healthy",
-        service="CricketGPT",
-    )
-
-
-@app.get(
-    "/api/info",
-    response_model=InfoResponse,
-    summary="Application info",
-    tags=["General"],
-)
-def app_info() -> InfoResponse:
-    """
-    Application info endpoint — returns name, version and environment.
-    """
-    return InfoResponse(
-        app_name="CricketGPT",
-        version="0.1.0",
-        environment="development",
-        description="AI-powered IPL cricket statistics and question-answering assistant.",
-    )
-
-
-@app.get(
-    "/health/database",
-    response_model=DatabaseHealthResponse,
-    responses={
-        200: {"model": DatabaseHealthResponse, "description": "Database is reachable"},
-        503: {"model": DatabaseErrorResponse, "description": "Database connection failed"},
-    },
-    summary="Database health check",
-    tags=["Database"],
-)
-def database_health_check():
-    """
-    Database health check endpoint — tests connectivity to Supabase PostgreSQL.
-
-    Executes a lightweight query (SELECT 1) and inspects PostgreSQL metadata.
-    - Returns 200 OK when the database is reachable.
-    - Returns 503 Service Unavailable when the database cannot be reached.
-    - Never leaks connection strings, passwords, or internal stack traces.
-    """
-    try:
-        result = check_database_connection()
-        return DatabaseHealthResponse(**result)
-    except (DatabaseConfigurationError, DatabaseConnectionError):
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "error", "message": "Database connection failed"},
-        )
-    except Exception:
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "error", "message": "Database connection failed"},
-        )
+app = create_app()

@@ -14,8 +14,11 @@ from app.database.connection import (
     DatabaseConfigurationError,
     DatabaseConnectionError,
     check_database_connection,
+    create_connection,
     get_database_url,
+    get_sanitized_connection_details,
     get_sanitized_host,
+    sanitize_connection_error_message,
 )
 from app.main import app
 
@@ -52,6 +55,71 @@ def test_get_sanitized_host_extracts_only_hostname():
     assert host == "db.supabase.co"
     assert "supersecretpass" not in host
     assert "myuser" not in host
+
+
+def test_sanitize_connection_error_message_redacts_credentials_and_dsn():
+    url = "postgresql://postgres.projref123:s3cr3t%40pass@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
+    raw = (
+        f'connection failed to "{url}": FATAL: password authentication failed '
+        'for user "postgres.projref123" password=s3cr3t@pass user=postgres.projref123'
+    )
+    cleaned = sanitize_connection_error_message(raw, db_url=url)
+    assert "s3cr3t" not in cleaned
+    assert "projref123" not in cleaned
+    assert "postgres.projref123" not in cleaned
+    assert url not in cleaned
+    assert "[REDACTED]" in cleaned
+
+
+def test_get_sanitized_connection_details_checks_pooler_format_without_leaking_secrets():
+    good_url = "postgresql://postgres.projref123:secret@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres?sslmode=require"
+    details = get_sanitized_connection_details(good_url)
+    assert details["host"] == "aws-0-ap-northeast-1.pooler.supabase.com"
+    assert details["port"] == 5432
+    assert details["effective_sslmode"] == "require"
+    assert details["connect_timeout"] == 10
+    assert details["is_supabase_pooler"] is True
+    assert details["pooler_username_has_project_ref"] is True
+    assert "secret" not in str(details)
+    assert "projref123" not in str(details)
+
+    bad_user_url = "postgresql://postgres:secret@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
+    bad_details = get_sanitized_connection_details(bad_user_url)
+    assert bad_details["is_supabase_pooler"] is True
+    assert bad_details["pooler_username_has_project_ref"] is False
+
+
+def test_create_connection_logs_sanitized_diagnostics_without_credentials(caplog):
+    import psycopg
+
+    fake_url = "postgresql://postgres.projref123:supersecret@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
+
+    class FakeOperationalError(psycopg.OperationalError):
+        sqlstate = "XX000"
+
+    raw_err = FakeOperationalError(
+        'connection failed: FATAL: Tenant or user not found for user "postgres.projref123" '
+        f"dsn={fake_url}"
+    )
+
+    with patch.dict("os.environ", {"DATABASE_URL": fake_url}):
+        with patch("app.database.connection.psycopg.connect", side_effect=raw_err):
+            with caplog.at_level("ERROR", logger="app.database.connection"):
+                with pytest.raises(DatabaseConnectionError) as exc_info:
+                    create_connection()
+
+    raised_msg = str(exc_info.value)
+    logged_msg = caplog.text
+
+    for text in (raised_msg, logged_msg):
+        assert "aws-0-ap-northeast-1.pooler.supabase.com" in text
+        assert "5432" in text
+        assert "sslmode=require" in text
+        assert "FakeOperationalError" in text
+        assert "sqlstate=XX000" in text
+        assert "supersecret" not in text
+        assert "projref123" not in text
+        assert fake_url not in text
 
 
 # ---------------------------------------------------------------------------

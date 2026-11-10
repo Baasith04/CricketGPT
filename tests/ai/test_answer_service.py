@@ -453,6 +453,45 @@ class TestLLMClientPlaceholderDetection(unittest.TestCase):
             generate_response("Who won?")
         self.assertIn("gemini, groq", str(ctx.exception))
 
+    @patch.dict("os.environ", {
+        "GEMINI_API_KEY": "AIzaTestKey123",
+        "GEMINI_MODEL": "gemini-2.5-flash",
+        "AI_TIMEOUT": "15",
+    })
+    @patch("app.ai.llm.client.genai.Client")
+    def test_generate_gemini_applies_ai_timeout_in_milliseconds(self, mock_client_cls):
+        fake_client = mock_client_cls.return_value.__enter__.return_value
+        fake_resp = unittest.mock.MagicMock()
+        fake_resp.text = "Gemini answer"
+        fake_client.models.generate_content.return_value = fake_resp
+
+        from app.ai.llm.client import _generate_gemini
+        result = _generate_gemini("Who won IPL 2024?")
+
+        self.assertEqual(result, "Gemini answer")
+        http_opts = mock_client_cls.call_args.kwargs["http_options"]
+        self.assertEqual(http_opts.timeout, 15000)
+
+    @patch.dict("os.environ", {
+        "AI_PRIMARY_PROVIDER": "gemini",
+        "AI_PROVIDER_ORDER": "gemini,groq",
+        "GEMINI_API_KEY": "super-secret-gemini-key",
+        "GROQ_API_KEY": "super-secret-groq-key",
+    })
+    @patch("app.ai.llm.client._generate_with_provider")
+    def test_generate_response_sanitizes_secrets_in_warning_logs(self, mock_gen):
+        mock_gen.side_effect = [
+            RuntimeError("Failed with Bearer super-secret-gemini-key"),
+            "Groq fallback succeeded",
+        ]
+        from app.ai.llm.client import generate_response
+        with self.assertLogs("app.ai.llm.client", level="WARNING") as cm:
+            res = generate_response("Test prompt")
+        self.assertEqual(res, "Groq fallback succeeded")
+        joined_logs = "\n".join(cm.output)
+        self.assertNotIn("super-secret-gemini-key", joined_logs)
+        self.assertIn("[REDACTED]", joined_logs)
+
 
 class TestCutoffAwareAnswerServices(unittest.TestCase):
     """Tests for within-cutoff Gemini, post-cutoff overview, and cross-cutoff synthesis."""

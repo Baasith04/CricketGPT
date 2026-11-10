@@ -13,16 +13,20 @@ Key concepts:
 - SSL: Supabase requires encrypted connections (sslmode=require).
 """
 
+import logging
 import os
+import re
 from contextlib import contextmanager
-from typing import Generator
-from urllib.parse import urlparse
+from typing import Any, Dict, Generator, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 import psycopg
 
 # Load environment variables from .env file (if present)
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseConfigurationError(Exception):
@@ -66,6 +70,123 @@ def get_sanitized_host(url: str) -> str:
         return "unknown-host"
 
 
+def get_sanitized_connection_details(url: str) -> Dict[str, Any]:
+    """
+    Extract non-secret connection attributes (host, port, SSL mode, pooler format flags)
+    without ever returning username, password, or the raw connection string.
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or "unknown-host"
+        port = parsed.port or 5432
+        query = parse_qs(parsed.query)
+        sslmode_values = query.get("sslmode")
+        sslmode_in_url = sslmode_values[0] if sslmode_values else None
+        username = parsed.username
+        password = parsed.password
+        has_dbname = bool(parsed.path and parsed.path.strip("/"))
+        is_pooler = host.endswith(".pooler.supabase.com")
+        pooler_user_ok = bool(
+            username
+            and "." in username
+            and not username.startswith(".")
+            and not username.endswith(".")
+        )
+        return {
+            "scheme": parsed.scheme or "",
+            "host": host,
+            "port": port,
+            "sslmode_in_url": sslmode_in_url,
+            "effective_sslmode": "require",
+            "connect_timeout": 10,
+            "is_supabase_pooler": is_pooler,
+            "pooler_username_has_project_ref": pooler_user_ok,
+            "has_username": bool(username),
+            "has_password": bool(password),
+            "has_dbname": has_dbname,
+        }
+    except Exception:
+        return {
+            "scheme": "",
+            "host": "unknown-host",
+            "port": 5432,
+            "sslmode_in_url": None,
+            "effective_sslmode": "require",
+            "connect_timeout": 10,
+            "is_supabase_pooler": False,
+            "pooler_username_has_project_ref": False,
+            "has_username": False,
+            "has_password": False,
+            "has_dbname": False,
+        }
+
+
+def sanitize_connection_error_message(message: str, db_url: Optional[str] = None) -> str:
+    """
+    Remove credentials, usernames, passwords, and connection strings from a raw
+    database exception message before logging or raising.
+    """
+    sanitized = str(message or "")
+    if db_url:
+        secrets_to_mask = [db_url, unquote(db_url)]
+        try:
+            parsed = urlparse(db_url)
+            for raw_secret in (parsed.password, parsed.username):
+                if raw_secret:
+                    secrets_to_mask.append(raw_secret)
+                    secrets_to_mask.append(unquote(raw_secret))
+        except Exception:
+            pass
+        for secret in sorted({s for s in secrets_to_mask if s}, key=len, reverse=True):
+            sanitized = sanitized.replace(secret, "[REDACTED]")
+
+    sanitized = re.sub(r"postgres(?:ql)?://[^\s@]+@", "postgresql://[REDACTED]@", sanitized)
+    sanitized = re.sub(
+        r"(?i)(password\s*=\s*)(?:'[^']*'|\"[^\"]*\"|\S+)",
+        r"\1[REDACTED]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"(?i)(user\s*=\s*)(?:'[^']*'|\"[^\"]*\"|\S+)",
+        r"\1[REDACTED]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r'(?i)(for user\s+)(?:"[^"]*"|\'[^\']*\'|\S+)',
+        r'\1"[REDACTED]"',
+        sanitized,
+    )
+    return sanitized.strip() or "No error details provided."
+
+
+def _log_and_raise_connection_error(
+    exc: Exception,
+    db_url: str,
+    details: Dict[str, Any],
+    prefix: str,
+) -> None:
+    """Log sanitized diagnostic details for a connection failure and raise DatabaseConnectionError."""
+    exc_class = f"{type(exc).__module__}.{type(exc).__name__}"
+    sqlstate = getattr(exc, "sqlstate", None)
+    sanitized_msg = sanitize_connection_error_message(str(exc), db_url=db_url)
+    logger.error(
+        "%s: host=%s port=%s sslmode=%s connect_timeout=%s exception_class=%s sqlstate=%s message=%s",
+        prefix,
+        details["host"],
+        details["port"],
+        details["effective_sslmode"],
+        details["connect_timeout"],
+        exc_class,
+        sqlstate or "N/A",
+        sanitized_msg,
+    )
+    raise DatabaseConnectionError(
+        f"{prefix} '{details['host']}' (port={details['port']}, "
+        f"sslmode={details['effective_sslmode']}, {exc_class}, "
+        f"sqlstate={sqlstate or 'N/A'}): {sanitized_msg}"
+    ) from None
+
+
 def create_connection() -> psycopg.Connection:
     """
     Establish a single new connection to Supabase PostgreSQL.
@@ -81,25 +202,28 @@ def create_connection() -> psycopg.Connection:
         DatabaseConnectionError: If the connection attempt fails (sanitized).
     """
     db_url = get_database_url()
-    host = get_sanitized_host(db_url)
+    details = get_sanitized_connection_details(db_url)
 
     try:
         # Enforce SSL requirement for Supabase cloud PostgreSQL
-        conn = psycopg.connect(db_url, sslmode="require", connect_timeout=10)
+        conn = psycopg.connect(
+            db_url,
+            sslmode=details["effective_sslmode"],
+            connect_timeout=details["connect_timeout"],
+        )
         return conn
     except psycopg.OperationalError as exc:
-        # OperationalError includes network failures, wrong password, host unreachable
-        raise DatabaseConnectionError(
-            f"Failed to connect to database host '{host}'. Please verify your credentials and network."
-        ) from None
+        _log_and_raise_connection_error(
+            exc, db_url, details, "Failed to connect to database host"
+        )
     except psycopg.Error as exc:
-        raise DatabaseConnectionError(
-            f"Database error while connecting to '{host}'."
-        ) from None
+        _log_and_raise_connection_error(
+            exc, db_url, details, "Database error while connecting to"
+        )
     except Exception as exc:
-        raise DatabaseConnectionError(
-            f"Unexpected error while connecting to database host '{host}'."
-        ) from None
+        _log_and_raise_connection_error(
+            exc, db_url, details, "Unexpected error while connecting to database host"
+        )
 
 
 @contextmanager

@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.rag.embeddings.embedder import DailyQuotaExhaustedError
 from app.rag.pipeline.rag_pipeline import (
     apply_gemini_embedding_migration,
     apply_rag_migration,
@@ -93,38 +94,53 @@ def main() -> int:
     )
 
     output = {}
+    exit_code = 0
 
-    if args.migrate:
-        apply_rag_migration()
-        output["migration"] = "applied"
+    try:
+        if args.migrate:
+            apply_rag_migration()
+            output["migration"] = "applied"
 
-    if args.migrate_gemini:
-        output["gemini_migration"] = apply_gemini_embedding_migration()
+        if args.migrate_gemini:
+            output["gemini_migration"] = apply_gemini_embedding_migration()
 
-    if args.knowledge_dir:
-        output["directory_ingestion"] = ingest_directory(
-            directory=args.knowledge_dir,
-            force=args.force,
-        )
+        if args.knowledge_dir:
+            output["directory_ingestion"] = ingest_directory(
+                directory=args.knowledge_dir,
+                force=args.force,
+            )
 
-    if args.match_summaries:
-        output["match_summaries"] = ingest_db_match_summaries(
-            seasons=args.seasons,
-            limit=args.limit,
-            force=args.force,
-        )
+        if args.match_summaries:
+            output["match_summaries"] = ingest_db_match_summaries(
+                seasons=args.seasons,
+                limit=args.limit,
+                force=args.force,
+            )
 
-    if args.backfill_rag:
-        output["backfill_rag"] = backfill_historical_match_rag(
-            batch_size=args.batch_size,
-            seasons=args.seasons,
-            max_matches=args.max_matches,
-            force=args.force,
-            dry_run=args.dry_run,
-        )
+        if args.backfill_rag:
+            backfill_res = backfill_historical_match_rag(
+                batch_size=args.batch_size,
+                seasons=args.seasons,
+                max_matches=args.max_matches,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+            output["backfill_rag"] = backfill_res
+            if backfill_res.get("quota_exhausted"):
+                exit_code = 2
+                logging.getLogger(__name__).error(
+                    "Backfill paused due to Gemini daily quota exhaustion. "
+                    "Remaining matches: %s. Resume after quota recovery with: %s",
+                    backfill_res.get("remaining_matches"),
+                    backfill_res.get("resume_command"),
+                )
+    except DailyQuotaExhaustedError as exc:
+        output["quota_exhausted"] = True
+        output["error"] = str(exc)
+        exit_code = 2
 
     print(json.dumps(output, indent=2, default=str))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -13,9 +13,11 @@ and supports:
 """
 
 import hashlib
+import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -29,12 +31,18 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "gemini-embedding-2").strip()
+REQUIRED_EMBEDDING_MODEL = "gemini-embedding-2"
+ALLOWED_EMBEDDING_MODELS = {REQUIRED_EMBEDDING_MODEL}
+DEFAULT_EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", REQUIRED_EMBEDDING_MODEL).strip()
 EMBEDDING_DIMENSION = int(os.getenv("RAG_EMBEDDING_DIMENSION", "768"))
 
 _PLACEHOLDER_PREFIXES = ("your_", "your-", "<your")
 
 T = TypeVar("T")
+
+
+class DailyQuotaExhaustedError(RuntimeError):
+    """Raised when Gemini daily embedding quota is exhausted; must not be retried."""
 
 
 def _is_placeholder(value: str) -> bool:
@@ -51,14 +59,94 @@ def _l2_normalize(vector: List[float]) -> List[float]:
 
 
 _TRANSIENT_GEMINI_HTTP_CODES = {408, 429, 500, 502, 503, 504}
+_DAILY_QUOTA_SUBSTRINGS = (
+    "perday",
+    "per_day",
+    "per day",
+    "requests per day",
+    "tokens per day",
+    "daily quota",
+    "daily limit",
+    "daily_limit",
+    "dailylimit",
+    "limit: 0",
+    '"quotavalue": "0"',
+    '"quotavalue": 0',
+)
+_MINUTE_RATE_LIMIT_SUBSTRINGS = (
+    "perminute",
+    "per_minute",
+    "per minute",
+    "requests per minute",
+    "tokens per minute",
+    "rate limit",
+)
+
+
+def _extract_error_text(exc: Exception) -> str:
+    """Collect exception message, status, and structured details into one lowercase string."""
+    parts: List[str] = [str(exc)]
+    for attr in ("status", "message"):
+        val = getattr(exc, attr, None)
+        if val:
+            parts.append(str(val))
+    details = getattr(exc, "details", None)
+    if details is not None:
+        try:
+            parts.append(json.dumps(details, default=str))
+        except Exception:
+            parts.append(str(details))
+    return " ".join(parts).lower()
+
+
+def is_daily_quota_exhausted_error(exc: Exception) -> bool:
+    """
+    Return True when an exception indicates Gemini daily quota exhaustion (non-retryable
+    until quota resets), while distinguishing short-lived per-minute rate limits.
+    """
+    if isinstance(exc, DailyQuotaExhaustedError):
+        return True
+
+    code = getattr(exc, "code", None)
+    if code is None:
+        code = getattr(exc, "status_code", None)
+
+    lower = _extract_error_text(exc)
+    is_quota_or_429 = (
+        code == 429
+        or "resource_exhausted" in lower
+        or "quota" in lower
+    )
+    if not is_quota_or_429:
+        return False
+
+    if any(marker in lower for marker in _DAILY_QUOTA_SUBSTRINGS) or re.search(
+        r"\b(?:rpd|tpd)\b", lower
+    ):
+        return True
+
+    retry_delay_match = re.search(r"retrydelay[^0-9]*(\d+(?:\.\d+)?)\s*s", lower)
+    if retry_delay_match and float(retry_delay_match.group(1)) >= 300.0:
+        return True
+
+    if any(marker in lower for marker in _MINUTE_RATE_LIMIT_SUBSTRINGS) or re.search(
+        r"\b(?:rpm|tpm)\b", lower
+    ):
+        return False
+
+    if "quota exhausted" in lower or "exceeded your current quota" in lower:
+        return True
+
+    return False
 
 
 def is_retryable_gemini_error(exc: Exception) -> bool:
     """
     Return True for transient network/rate-limit/5xx Gemini errors and False for
-    permanent authentication (401/403), invalid-argument (400), or config errors.
+    daily quota exhaustion, permanent authentication (401/403), invalid-argument (400),
+    or config errors.
     """
-    if isinstance(exc, ValueError):
+    if isinstance(exc, (ValueError, DailyQuotaExhaustedError)) or is_daily_quota_exhausted_error(exc):
         return False
     code = getattr(exc, "code", None)
     if code is None:
@@ -106,18 +194,29 @@ class EmbeddingService:
 
     def __init__(
         self,
-        model_name: str = DEFAULT_EMBEDDING_MODEL,
+        model_name: Optional[str] = None,
         dimension: int = EMBEDDING_DIMENSION,
         cache_size: int = 2048,
         timeout_seconds: Optional[int] = None,
     ) -> None:
-        if not model_name or not model_name.strip() or _is_placeholder(model_name):
-            raise ValueError(f"Invalid Gemini embedding model configuration: '{model_name}'")
+        raw_model = (
+            model_name
+            if model_name is not None
+            else os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        )
+        cleaned_model = (raw_model or "").strip()
+        if not cleaned_model or _is_placeholder(cleaned_model):
+            raise ValueError(f"Invalid Gemini embedding model configuration: '{raw_model}'")
+        if cleaned_model not in ALLOWED_EMBEDDING_MODELS:
+            raise ValueError(
+                f"Unsupported embedding model '{cleaned_model}'. "
+                f"CricketGPT requires '{REQUIRED_EMBEDDING_MODEL}' to preserve 768-d vector space consistency."
+            )
         if dimension <= 0 or dimension > 2000:
             raise ValueError(
                 "RAG embedding dimension must be between 1 and 2000 for pgvector HNSW indexing."
             )
-        self.model_name = model_name.strip()
+        self.model_name = cleaned_model
         self.dimension = dimension
         self.cache_size = cache_size
         self.timeout_seconds = (
@@ -187,15 +286,22 @@ class EmbeddingService:
             task_type=task_type,
         )
 
-        with genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(timeout=timeout_ms),
-        ) as client:
-            response = client.models.embed_content(
-                model=self.model_name,
-                contents=contents,
-                config=config,
-            )
+        try:
+            with genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=timeout_ms),
+            ) as client:
+                response = client.models.embed_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=config,
+                )
+        except Exception as exc:
+            if is_daily_quota_exhausted_error(exc):
+                raise DailyQuotaExhaustedError(
+                    f"Gemini daily embedding quota exhausted for model '{self.model_name}': {exc}"
+                ) from exc
+            raise
 
         embeddings = getattr(response, "embeddings", None) or []
         if len(embeddings) != len(texts):
