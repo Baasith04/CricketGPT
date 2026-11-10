@@ -1,0 +1,24 @@
+# =============================================================================
+# CricketGPT Backend Dependencies
+# =============================================================================
+
+# Web framework & ASGI server
+fastapi==0.162.0
+starlette==1.10.0
+pydantic==2.14.2
+uvicorn==0.54.0
+
+# Database driver (psycopg 3 with standalone binary)
+psycopg[binary]==3.3.8
+
+# Environment variables loader
+python-dotenv==1.2.4
+
+# AI providers
+google-genai==2.34.0
+openai==3.48.0
+
+# Testing & HTTP client
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+httpx==0.28.1

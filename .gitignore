@@ -1,0 +1,46 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# pytest and coverage
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Distribution and packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Generated validation reports
+bulk_import_report.json
+scorecard_validation_report.json
+detailed_scorecard_validation_report.json
+
+# Local datasets (only if not intended for GitHub)
+dataset/
