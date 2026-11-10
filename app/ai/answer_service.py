@@ -10,9 +10,13 @@ from app.ai.llm.client import generate_response
 from app.ai.prompts.system_prompt import CRICKETGPT_SYSTEM_PROMPT
 from app.rag.retrieval.hybrid_retriever import hybrid_retrieve
 from app.services.matches.match_service import (
+    PLAYOFF_STAGE_LABELS,
     get_latest_season,
+    get_match_details,
     get_match_result,
     get_season_winner,
+    normalize_playoff_stage,
+    resolve_playoff_match,
 )
 from app.services.statistics.leaderboard_service import (
     get_batting_leaderboard,
@@ -265,19 +269,43 @@ def answer_season_winner_question(season: str) -> str:
 
 
 def answer_scorecard_question(match_id: int) -> str:
-    """Format a match scorecard using verified SQL results."""
+    """Format a match scorecard (batting, bowling, extras, fall of wickets, result) from SQL."""
 
     scorecard = get_match_scorecard(match_id)
 
-    if scorecard is None:
+    if scorecard is None or (not scorecard.get("innings") and not scorecard.get("super_overs")):
         return f"No scorecard found for match {match_id}."
 
+    wickets_by_innings: Dict[tuple[bool, int], List[Dict[str, Any]]] = {}
+    try:
+        wickets_data = get_match_wickets(match_id)
+    except Exception:
+        wickets_data = None
+    if isinstance(wickets_data, dict):
+        for inn_w in wickets_data.get("innings") or []:
+            wickets_by_innings[(False, inn_w["innings_number"])] = inn_w.get("fall_of_wickets") or []
+        for so_w in wickets_data.get("super_overs") or []:
+            wickets_by_innings[(True, so_w["innings_number"])] = so_w.get("fall_of_wickets") or []
+
+    match_meta = scorecard.get("match") or {}
+    season_val = match_meta.get("season")
+    stage_val = match_meta.get("stage")
+    heading_bits = [f"IPL {season_val}" if season_val else "IPL"]
+    if stage_val:
+        heading_bits.append(str(stage_val))
+    heading_bits.append(f"Match {match_id} - Scorecard")
+
     lines = [
-        f"## IPL Match {match_id} - Scorecard",
+        f"## {' '.join(heading_bits)}",
         "",
     ]
 
-    def format_innings(innings, heading):
+    meta_lines = _format_match_metadata_lines(match_meta)
+    lines.extend(meta_lines)
+    if meta_lines:
+        lines.append("")
+
+    def format_innings(innings, heading, fow_list=None):
         lines.append(f"### {heading}")
         lines.append(
             f"**{innings['batting_team']}: "
@@ -334,19 +362,35 @@ def answer_scorecard_question(match_id: int) -> str:
             "",
         ])
 
+        if fow_list:
+            fow_parts = [
+                f"{w['wicket_number']}-{w['score']} ({w['player_name']}, {w['overs']} ov)"
+                for w in fow_list
+            ]
+            lines.append(f"**Fall of wickets:** {', '.join(fow_parts)}")
+            lines.append("")
+
     for innings in scorecard["innings"]:
         heading = (
             f"Innings {innings['innings_number']} - "
             f"{innings['batting_team']}"
         )
-        format_innings(innings, heading)
+        format_innings(
+            innings,
+            heading,
+            fow_list=wickets_by_innings.get((False, innings["innings_number"])),
+        )
 
     for innings in scorecard["super_overs"]:
         heading = (
             f"Super Over {innings['innings_number']} - "
             f"{innings['batting_team']}"
         )
-        format_innings(innings, heading)
+        format_innings(
+            innings,
+            heading,
+            fow_list=wickets_by_innings.get((True, innings["innings_number"])),
+        )
 
     lines.extend([
         "---",
@@ -355,6 +399,143 @@ def answer_scorecard_question(match_id: int) -> str:
     ])
 
     return "\n".join(lines)
+
+
+def _format_match_metadata_lines(match_meta: Dict[str, Any]) -> List[str]:
+    """Build standardized Fixture, Date, Venue, Toss, and Result lines from match metadata."""
+    meta_lines: List[str] = []
+    teams_meta = match_meta.get("teams") or []
+    if teams_meta:
+        fixture = " vs ".join(t["team_name"] for t in teams_meta if t.get("team_name"))
+        if fixture:
+            meta_lines.append(f"**Fixture:** {fixture}")
+    if match_meta.get("match_date"):
+        meta_lines.append(f"**Date:** {match_meta['match_date']}")
+    if match_meta.get("venue"):
+        city = match_meta.get("city")
+        venue_str = (
+            f"{match_meta['venue']}, {city}"
+            if city and city.lower() not in str(match_meta["venue"]).lower()
+            else str(match_meta["venue"])
+        )
+        meta_lines.append(f"**Venue:** {venue_str}")
+    toss_meta = match_meta.get("toss") or {}
+    if toss_meta.get("toss_winner_name"):
+        meta_lines.append(
+            f"**Toss:** {toss_meta['toss_winner_name']} won the toss and elected to "
+            f"{toss_meta.get('toss_decision') or 'play'}"
+        )
+    result_meta = match_meta.get("result") or {}
+    if result_meta.get("summary"):
+        meta_lines.append(f"**Result:** {result_meta['summary']}")
+    return meta_lines
+
+
+def _format_playoff_match_summary(match_id: int, fallback_stage_label: Optional[str] = None) -> str:
+    """Format verified SQL match details (teams, date, venue, toss, result) for a resolved match."""
+    match_meta = get_match_details(match_id)
+    if not match_meta:
+        return f"No database record found for match {match_id}."
+
+    season_val = match_meta.get("season")
+    stage_val = match_meta.get("stage") or fallback_stage_label
+    heading_bits = [f"IPL {season_val}" if season_val else "IPL"]
+    if stage_val:
+        heading_bits.append(str(stage_val))
+    heading_bits.append(f"(Match {match_id})")
+
+    lines = [f"## {' '.join(heading_bits)}", ""]
+    if stage_val:
+        lines.append(f"**Stage:** {stage_val}")
+    lines.extend(_format_match_metadata_lines(match_meta))
+    lines.extend([
+        "",
+        "Source: CricketGPT historical IPL database (Supabase).",
+    ])
+    return "\n".join(lines)
+
+
+def _dispatch_match_detail(
+    match_id: int,
+    detail_type: str,
+    stage_label: Optional[str] = None,
+) -> str:
+    """Dispatch a resolved match ID to the requested SQL detail formatter."""
+    if detail_type == "wickets":
+        return answer_wickets_question(match_id)
+    if detail_type == "last_over":
+        return answer_last_over_question(match_id)
+    if detail_type == "potm":
+        return answer_match_awards_question(match_id=match_id)
+    if detail_type == "summary":
+        return _format_playoff_match_summary(match_id, fallback_stage_label=stage_label)
+    return answer_scorecard_question(match_id)
+
+
+def answer_season_final_detail_question(season: str, detail_type: str = "scorecard") -> str:
+    """Resolve an IPL season final via SQL and return its scorecard, wickets, or last over."""
+    if not season or not str(season).strip():
+        return "Please specify an IPL season to look up the final match."
+
+    result = get_season_winner(str(season).strip())
+    if result is None or not result.get("match_id"):
+        return f"No IPL final match record was found in the database for season {season}."
+
+    return _dispatch_match_detail(int(result["match_id"]), detail_type, stage_label="Final")
+
+
+def answer_playoff_match_question(
+    season: str,
+    stage: str,
+    detail_type: str = "scorecard",
+) -> str:
+    """Resolve an IPL playoff match via SQL stage metadata and format the requested detail."""
+    canonical_stage = normalize_playoff_stage(stage)
+    stage_label = PLAYOFF_STAGE_LABELS.get(canonical_stage or "", "playoff match")
+
+    if not season or not str(season).strip():
+        return (
+            f"Please specify the IPL season for {stage_label} "
+            f"(for example: 'Give me the IPL 2024 {stage_label} scorecard')."
+        )
+
+    if canonical_stage is None:
+        return (
+            "Please specify which playoff stage you want: "
+            "Qualifier 1, Qualifier 2, Eliminator, or Final."
+        )
+
+    clean_season = str(season).strip()
+    resolution = resolve_playoff_match(clean_season, canonical_stage)
+    status = resolution.get("status")
+
+    if status == "not_found":
+        return (
+            f"No {stage_label} match record was found in the database for IPL {clean_season}. "
+            "(Note: early IPL seasons 2008-2010 used Semi Finals instead of Qualifier/Eliminator stages.) "
+            "Please verify the season and stage or provide a specific match ID or date."
+        )
+
+    if status == "ambiguous":
+        candidates = ", ".join(
+            f"Match {m['match_id']} ({m['match_date']})"
+            for m in resolution.get("matches") or []
+        )
+        return (
+            f"Multiple {stage_label} records were found for IPL {clean_season} ({candidates}). "
+            "Please specify a match ID or match date to view the exact match."
+        )
+
+    matched = resolution.get("match") or {}
+    match_id = matched.get("match_id")
+    if not match_id:
+        return f"No {stage_label} match record was found in the database for IPL {clean_season}."
+
+    return _dispatch_match_detail(
+        int(match_id),
+        detail_type,
+        stage_label=matched.get("stage") or stage_label,
+    )
 
 
 def answer_wickets_question(match_id: int) -> str:

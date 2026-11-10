@@ -25,9 +25,11 @@ from app.ai.answer_service import (
     answer_player_multi_season_comparison_question,
     answer_player_question,
     answer_player_season_breakdown_question,
+    answer_playoff_match_question,
     answer_post_cutoff_overview_question,
     answer_rag_narrative_question,
     answer_scorecard_question,
+    answer_season_final_detail_question,
     answer_season_winner_question,
     answer_team_question,
     answer_team_runs_leaderboard_question,
@@ -41,6 +43,7 @@ from app.ai.cutoff import (
     normalize_season_token,
 )
 from app.services.matches.match_service import (
+    PLAYOFF_STAGE_LABELS,
     get_first_match_id,
     get_latest_season,
 )
@@ -472,6 +475,67 @@ def _resolve_relative_season(
     return None
 
 
+def extract_playoff_stage(normalized: str) -> Dict[str, Any]:
+    """Extract canonical IPL playoff stage or ambiguity signal from normalized question text."""
+    cleaned = re.sub(r"\bone[- ]over\s+eliminator\b", " ", normalized)
+    has_cricket_context = bool(re.search(
+        r"\b(ipl|season|qualifier|playoff|play-off|scorecard|score card|wicket|wickets|"
+        r"last over|final over|potm|man of the match|player of the match|match|played|"
+        r"won|winner|result|20\d{2})\b",
+        cleaned,
+    ))
+
+    matched_stages: List[str] = []
+    if re.search(r"\b(?:qualifier[- ]?(?:2|two)|(?:second|2nd)\s+qualifier)\b", cleaned) or (
+        has_cricket_context and re.search(r"\bq2\b", cleaned)
+    ):
+        matched_stages.append("qualifier_2")
+
+    if re.search(r"\b(?:qualifier[- ]?(?:1|one)|(?:first|1st)\s+qualifier)\b", cleaned) or (
+        has_cricket_context and re.search(r"\bq1\b", cleaned)
+    ):
+        matched_stages.append("qualifier_1")
+
+    if re.search(r"\b(?:eliminator|elimination\s+(?:final|match))\b", cleaned):
+        matched_stages.append("eliminator")
+
+    final_cleaned = re.sub(
+        r"\b(?:final\s+over|elimination\s+final|semi[- ]?finals?|semifinals?|quarter[- ]?finals?|quarterfinals?)\b",
+        " ",
+        cleaned,
+    )
+    if re.search(r"\bfinal\b", final_cleaned):
+        matched_stages.append("final")
+
+    if len(matched_stages) == 1:
+        return {
+            "stage": matched_stages[0],
+            "matched_stages": matched_stages,
+            "ambiguous_type": None,
+        }
+
+    if len(matched_stages) > 1:
+        return {
+            "stage": None,
+            "matched_stages": matched_stages,
+            "ambiguous_type": "multiple_stages",
+        }
+
+    ambiguous_type: Optional[str] = None
+    if re.search(r"\bqualifiers?\b", cleaned):
+        ambiguous_type = "qualifier"
+    elif re.search(r"\b(?:semi[- ]?finals?|semifinals?)\b", cleaned):
+        ambiguous_type = "semi_final"
+    elif re.search(r"\b(?:play[- ]?offs?|knockouts?)\b", cleaned):
+        ambiguous_type = "playoff"
+
+    return {
+        "stage": None,
+        "matched_stages": [],
+        "ambiguous_type": ambiguous_type,
+    }
+
+
 def extract_query_entities(question: str) -> Dict[str, Any]:
     """Extract normalized text, seasons, cutoff scope, date, match_id, limit, and teams."""
     normalized = re.sub(r"\s+", " ", question.lower().strip())
@@ -623,19 +687,82 @@ def route_question(question: str) -> str:
     ]):
         return answer_extras_dismissals_question(season=eff_season())
 
+    has_leaderboard_phrase = (
+        entities["has_explicit_limit"]
+        or any(term in normalized for term in _LEADERBOARD_GUARD_TERMS)
+        or "run scorer" in normalized
+        or "wicket taker" in normalized
+    )
+    is_rule_question = any(t in normalized for t in [
+        "dls", "duckworth", "impact player", "rule", "rules", "playing conditions",
+    ])
+    is_narrative_question = any(t in normalized for t in [
+        "explain", "campaign", "history", "story", "journey",
+        "summary", "summarize", "recap", "why did", "why was",
+        "how did", "what happened", "tell me about",
+    ])
+    wants_explicit_stats = any(t in normalized for t in [
+        "statistics", "stats", "using match statistics", "using statistics",
+        "record", "records", "win percentage", "win rate",
+        "wins", "losses", "titles", "trophies", "championships",
+        "how many matches", "how many wins", "batting average", "bowling economy",
+    ])
+    is_best_figures_record = any(t in normalized for t in [
+        "best bowling figures", "best bowling performance", "best bowling spell",
+        "best batting figures",
+    ])
+    has_scorecard_intent = (
+        not is_best_figures_record
+        and any(t in normalized for t in [
+            "scorecard", "score card", "batting figures", "bowling figures",
+            "innings details", "full score", "innings-wise", "innings wise",
+        ])
+    )
+    has_wickets_intent = any(t in normalized for t in [
+        "fall of wickets", "wicket fell", "wickets fell",
+        "wicket details", "dismissals",
+    ])
+    has_last_over_intent = any(t in normalized for t in [
+        "last over", "final over", "20th over",
+    ])
+    playoff_info = extract_playoff_stage(normalized)
+
     # ------------------------------------------------------------------
-    # 4. Player of the Match (without match ID: season final or all-time)
+    # 4. Player of the Match (without match ID: season stage/final or all-time)
     # ------------------------------------------------------------------
     if any(t in normalized for t in ["player of the match", "man of the match", "potm", "motm"]):
         resolved = eff_season()
+        if (
+            playoff_info["ambiguous_type"] == "qualifier"
+            and not has_leaderboard_phrase
+        ):
+            return (
+                "Please clarify whether you mean Qualifier 1 or Qualifier 2 "
+                "(for example: 'Who won Player of the Match in IPL 2024 Qualifier 2?')."
+            )
+        if (
+            playoff_info["stage"] in {"qualifier_1", "qualifier_2", "eliminator"}
+            and not has_leaderboard_phrase
+        ):
+            stage_label = PLAYOFF_STAGE_LABELS[playoff_info["stage"]]
+            if resolved is None:
+                return (
+                    f"Please specify the IPL season for {stage_label} "
+                    f"(for example: 'Who won Player of the Match in IPL 2024 {stage_label}?')."
+                )
+            return answer_playoff_match_question(
+                resolved,
+                playoff_info["stage"],
+                detail_type="potm",
+            )
         return answer_match_awards_question(
             season=resolved,
-            final_only=("final" in normalized and resolved is not None),
+            final_only=(playoff_info["stage"] == "final" and resolved is not None),
             limit=limit,
         )
 
     # ------------------------------------------------------------------
-    # 5. Match by Date & Team-vs-Team / Head-to-Head (Sections 2E & 2F)
+    # 5. Match by Date & Playoff Stage Resolution & Team-vs-Team / Head-to-Head
     # ------------------------------------------------------------------
     is_versus_trigger = bool(
         re.search(r"\b(?:vs\.?|versus)\b|head[- ]to[- ]head", normalized)
@@ -657,6 +784,84 @@ def route_question(question: str) -> str:
             wants_potm="player of the match" in normalized or "man of the match" in normalized,
         )
 
+    ambiguous_playoff = playoff_info["ambiguous_type"]
+    if ambiguous_playoff is not None and not is_rule_question and not has_leaderboard_phrase:
+        if ambiguous_playoff == "multiple_stages" and (
+            has_scorecard_intent
+            or has_wickets_intent
+            or has_last_over_intent
+            or (not is_narrative_question and "compare" not in normalized)
+        ):
+            return (
+                "Multiple playoff stages were mentioned. Please specify one playoff stage "
+                "at a time: Qualifier 1, Qualifier 2, Eliminator, or Final."
+            )
+        if ambiguous_playoff == "qualifier" and not is_narrative_question:
+            return (
+                "Please clarify whether you mean Qualifier 1 or Qualifier 2 "
+                "(for example: 'Give me the IPL 2024 Qualifier 2 scorecard')."
+            )
+        if ambiguous_playoff == "semi_final" and not is_narrative_question:
+            return (
+                "Semi-final stages can include multiple matches in a season. Please specify "
+                "the teams, match date, or match ID to retrieve match details."
+            )
+        if ambiguous_playoff == "playoff" and not is_narrative_question and (
+            has_scorecard_intent
+            or has_wickets_intent
+            or has_last_over_intent
+            or bool(re.search(r"\b(who played|who won|result|when was|where was)\b", normalized))
+        ):
+            return (
+                "Please specify which playoff match you mean — Qualifier 1, Qualifier 2, "
+                "Eliminator, or Final (for example: 'Give me the IPL 2024 Qualifier 2 scorecard')."
+            )
+
+    playoff_stage = playoff_info["stage"]
+    if playoff_stage is not None:
+        wants_stage_detail = has_scorecard_intent or has_wickets_intent or has_last_over_intent
+        wants_stage_summary = (
+            not wants_stage_detail
+            and not is_narrative_question
+            and not is_rule_question
+            and not has_leaderboard_phrase
+            and "compare" not in normalized
+            and (
+                playoff_stage in {"qualifier_1", "qualifier_2", "eliminator"}
+                or any(
+                    t in normalized
+                    for t in ["who played", "fixture", "teams", "venue", "where was", "when was", "match details", "result of"]
+                )
+            )
+        )
+        if wants_stage_detail or wants_stage_summary:
+            stage_label = PLAYOFF_STAGE_LABELS[playoff_stage]
+            if len(seasons) > 1:
+                return (
+                    f"Multiple IPL seasons were mentioned. Please specify a single season for "
+                    f"{stage_label} (for example: 'Give me the IPL 2024 {stage_label} scorecard')."
+                )
+            resolved = eff_season()
+            if resolved is None:
+                return (
+                    f"Please specify the IPL season for {stage_label} "
+                    f"(for example: 'Give me the IPL 2024 {stage_label} scorecard')."
+                )
+            detail_type = (
+                "wickets"
+                if has_wickets_intent
+                else (
+                    "last_over"
+                    if has_last_over_intent
+                    else ("scorecard" if has_scorecard_intent else "summary")
+                )
+            )
+            return answer_playoff_match_question(
+                resolved,
+                playoff_stage,
+                detail_type=detail_type,
+            )
+
     if is_versus_trigger:
         teams = _extract_head_to_head_teams(normalized)
         if teams:
@@ -665,11 +870,10 @@ def route_question(question: str) -> str:
                 return answer_team_versus_matches_question(teams[0], teams[1], season=resolved)
             return answer_head_to_head_question(teams[0], teams[1])
 
-    # Ambiguous match-specific requests without match ID or date
-    if any(t in normalized for t in [
-        "show the scorecard", "show scorecard", "fall of wickets",
-        "last over", "innings-wise scores", "innings wise scores",
-    ]) and match_id is None and match_date is None:
+    # Ambiguous match-specific requests without match ID, date, or playoff stage
+    if (
+        has_scorecard_intent or has_wickets_intent or has_last_over_intent
+    ) and match_id is None and match_date is None and not has_leaderboard_phrase:
         return (
             "Please specify a match ID or date and teams to retrieve match details "
             "(for example: 'Show scorecard for match 335982' or "
@@ -687,6 +891,7 @@ def route_question(question: str) -> str:
         (season is not None or cutoff["is_relative_recent"])
         and any(term in normalized for term in winner_terms)
         and ("ipl" in normalized or "season" in normalized)
+        and playoff_stage not in {"qualifier_1", "qualifier_2", "eliminator"}
         and not team_matches
         and not is_versus_trigger
     )
@@ -770,28 +975,6 @@ def route_question(question: str) -> str:
         "most championships", "which team has won the most",
     ]) and not team_matches:
         return answer_most_titles_question()
-
-    has_leaderboard_phrase = (
-        entities["has_explicit_limit"]
-        or any(term in normalized for term in _LEADERBOARD_GUARD_TERMS)
-        or "run scorer" in normalized
-        or "wicket taker" in normalized
-    )
-
-    is_rule_question = any(t in normalized for t in [
-        "dls", "duckworth", "impact player", "rule", "rules", "playing conditions",
-    ])
-    is_narrative_question = any(t in normalized for t in [
-        "explain", "campaign", "history", "story", "journey",
-        "summary", "summarize", "recap", "why did", "why was",
-        "how did", "what happened", "tell me about",
-    ])
-    wants_explicit_stats = any(t in normalized for t in [
-        "statistics", "stats", "using match statistics", "using statistics",
-        "record", "records", "win percentage", "win rate",
-        "wins", "losses", "titles", "trophies", "championships",
-        "how many matches", "how many wins", "batting average", "bowling economy",
-    ])
 
     # ------------------------------------------------------------------
     # 8a. Rules & Hybrid Team Statistics + Narrative

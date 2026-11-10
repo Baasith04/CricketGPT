@@ -555,6 +555,161 @@ class TestRouteQuestion(unittest.TestCase):
         self.assertEqual(since_only["seasons"], ["2020/21"])
         self.assertEqual(since_only["cutoff"]["scope"], "cross_cutoff")
 
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    @patch("app.ai.query_router.router.answer_playoff_match_question")
+    def test_ipl_2024_final_scorecard_uses_sql_even_within_cutoff(
+        self, mock_playoff, mock_hist
+    ):
+        mock_playoff.return_value = "IPL 2024 Final Scorecard [SQL]"
+        result = self._route("Give me the IPL 2024 final scorecard.")
+        mock_playoff.assert_called_once_with("2024", "final", detail_type="scorecard")
+        mock_hist.assert_not_called()
+        self.assertEqual(result, "IPL 2024 Final Scorecard [SQL]")
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    @patch("app.ai.query_router.router.answer_playoff_match_question")
+    def test_ipl_2023_final_scorecard_uses_sql(
+        self, mock_playoff, mock_hist
+    ):
+        mock_playoff.return_value = "IPL 2023 Final Scorecard [SQL]"
+        result = self._route("Give me the IPL 2023 final scorecard.")
+        mock_playoff.assert_called_once_with("2023", "final", detail_type="scorecard")
+        mock_hist.assert_not_called()
+        self.assertEqual(result, "IPL 2023 Final Scorecard [SQL]")
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_season_winner_question")
+    def test_ipl_2008_winner_routes_to_sql_winner(self, mock_winner):
+        mock_winner.return_value = "Rajasthan Royals won IPL 2007/08."
+        result = self._route("Who won IPL 2008?")
+        mock_winner.assert_called_once_with("2007/08")
+        self.assertEqual(result, "Rajasthan Royals won IPL 2007/08.")
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_rag_narrative_question")
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    def test_rajasthan_royals_2008_campaign_routes_to_historical_llm(
+        self, mock_hist, mock_rag
+    ):
+        mock_hist.return_value = "RR 2008 campaign [Gemini Historical Knowledge]"
+        result = self._route("Explain Rajasthan Royals' 2008 campaign")
+        mock_hist.assert_called_once()
+        mock_rag.assert_not_called()
+        self.assertEqual(result, "RR 2008 campaign [Gemini Historical Knowledge]")
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    @patch("app.ai.query_router.router.answer_leaderboard_question")
+    def test_most_runs_ipl_2024_uses_sql_even_within_cutoff(
+        self, mock_lb, mock_hist
+    ):
+        mock_lb.return_value = "Top run scorers in IPL 2024 [SQL]"
+        result = self._route("Who scored the most runs in IPL 2024?")
+        mock_lb.assert_called_once_with(
+            category="runs",
+            question_type="batting",
+            season="2024",
+            limit=10,
+        )
+        mock_hist.assert_not_called()
+        self.assertEqual(result, "Top run scorers in IPL 2024 [SQL]")
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    @patch("app.ai.query_router.router.answer_playoff_match_question")
+    def test_ipl_2026_final_scorecard_uses_sql(
+        self, mock_playoff, mock_hist
+    ):
+        mock_playoff.return_value = "IPL 2026 Final Scorecard [SQL]"
+        result = self._route("Give me the IPL 2026 final scorecard.")
+        mock_playoff.assert_called_once_with("2026", "final", detail_type="scorecard")
+        mock_hist.assert_not_called()
+        self.assertEqual(result, "IPL 2026 Final Scorecard [SQL]")
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_season_winner_question")
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    @patch("app.ai.query_router.router.answer_playoff_match_question")
+    def test_playoff_stage_scorecard_and_summary_variations_route_correctly(
+        self, mock_playoff, mock_hist, mock_winner
+    ):
+        cases = [
+            ("Give me the scorecard of the second qualifier in IPL 2024.", ("2024", "qualifier_2", "scorecard")),
+            ("Second qualifier IPL 2024 scorecard", ("2024", "qualifier_2", "scorecard")),
+            ("IPL 2024 Qualifier 2", ("2024", "qualifier_2", "summary")),
+            ("Who played the second qualifier in IPL 2024?", ("2024", "qualifier_2", "summary")),
+            ("Who won the second qualifier in IPL 2024?", ("2024", "qualifier_2", "summary")),
+            ("Show the eliminator scorecard in IPL 2024", ("2024", "eliminator", "scorecard")),
+            ("Give me IPL 2024 Qualifier 1 scorecard", ("2024", "qualifier_1", "scorecard")),
+            ("Show the eliminator scorecard in IPL 2016", ("2016", "eliminator", "scorecard")),
+            ("Give me IPL 2023 Qualifier 2 scorecard", ("2023", "qualifier_2", "scorecard")),
+            ("Give me IPL 2026 Qualifier 1 scorecard", ("2026", "qualifier_1", "scorecard")),
+        ]
+        for query, (exp_season, exp_stage, exp_detail) in cases:
+            mock_playoff.reset_mock()
+            mock_playoff.return_value = f"{exp_season}-{exp_stage}-{exp_detail}"
+            res = self._route(query)
+            mock_playoff.assert_called_once_with(exp_season, exp_stage, detail_type=exp_detail)
+            self.assertEqual(res, f"{exp_season}-{exp_stage}-{exp_detail}")
+
+        mock_hist.assert_not_called()
+        mock_winner.assert_not_called()
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    @patch("app.ai.query_router.router.answer_playoff_match_question")
+    def test_ambiguous_playoff_queries_ask_for_clarification(self, mock_playoff, mock_hist):
+        res_qual = self._route("Give me the IPL 2024 qualifier scorecard.")
+        self.assertIn("Qualifier 1 or Qualifier 2", res_qual)
+
+        res_playoff = self._route("Give me the IPL 2024 playoff scorecard.")
+        self.assertIn("Qualifier 1, Qualifier 2, Eliminator, or Final", res_playoff)
+
+        res_missing_season = self._route("Give me the Qualifier 2 scorecard.")
+        self.assertIn("specify the IPL season", res_missing_season)
+
+        res_multi_season = self._route("IPL 2023 and 2024 Qualifier 2 scorecard.")
+        self.assertIn("single season", res_multi_season)
+
+        res_multi_stage = self._route("IPL 2024 Qualifier 1 and Qualifier 2 scorecard.")
+        self.assertIn("one playoff stage at a time", res_multi_stage)
+
+        mock_playoff.assert_not_called()
+        mock_hist.assert_not_called()
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.resolve_playoff_match")
+    def test_missing_playoff_match_record_returns_clear_message_without_llm(
+        self, mock_resolve, mock_gen
+    ):
+        mock_resolve.return_value = {
+            "status": "not_found",
+            "season": "2007/08",
+            "stage": "qualifier_2",
+            "stage_label": "Qualifier 2",
+            "match": None,
+            "matches": [],
+        }
+        result = self._route("Give me IPL 2008 Qualifier 2 scorecard.")
+        mock_resolve.assert_called_once_with("2007/08", "qualifier_2")
+        mock_gen.assert_not_called()
+        self.assertIn("No Qualifier 2 match record was found", result)
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2024", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2025-03-01"})
+    @patch("app.ai.query_router.router.answer_playoff_match_question")
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    def test_narrative_playoff_question_still_uses_gemini_historical_within_cutoff(
+        self, mock_hist, mock_playoff
+    ):
+        mock_hist.return_value = "Historical Qualifier 2 narrative"
+        result = self._route("Explain IPL 2024 Qualifier 2")
+        mock_hist.assert_called_once()
+        mock_playoff.assert_not_called()
+        self.assertEqual(result, "Historical Qualifier 2 narrative")
+
 
 if __name__ == "__main__":
     unittest.main()

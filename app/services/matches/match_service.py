@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from app.database.connection import get_db_connection
 from app.services.teams.team_statistics_service import (
     get_team_championships,
@@ -105,7 +105,10 @@ def get_match_details(match_id: int) -> Optional[Dict[str, Any]]:
             m.match_date,
             m.venue,
             m.city,
-            m.stage,
+            COALESCE(
+                NULLIF(TRIM(m.stage), ''),
+                NULLIF(TRIM(m.raw_json->'info'->'event'->>'stage'), '')
+            ) AS stage,
             m.toss_winner_id,
             t_toss.canonical_name AS toss_winner_name,
             m.toss_decision,
@@ -232,3 +235,136 @@ def get_latest_season() -> Optional[str]:
             cur.execute(query)
             row = cur.fetchone()
     return str(row[0]).strip() if row and row[0] is not None else None
+
+
+PLAYOFF_STAGE_LABELS: Dict[str, str] = {
+    "qualifier_1": "Qualifier 1",
+    "qualifier_2": "Qualifier 2",
+    "eliminator": "Eliminator",
+    "final": "Final",
+}
+
+# Cricsheet records 2011, 2012, and 2016 Eliminator matches as "Elimination Final".
+PLAYOFF_STAGE_DB_VALUES: Dict[str, tuple[str, ...]] = {
+    "qualifier_1": ("Qualifier 1",),
+    "qualifier_2": ("Qualifier 2",),
+    "eliminator": ("Eliminator", "Elimination Final"),
+    "final": ("Final",),
+}
+
+_PLAYOFF_STAGE_ALIASES: Dict[str, str] = {
+    "qualifier_1": "qualifier_1",
+    "qualifier 1": "qualifier_1",
+    "qualifier-1": "qualifier_1",
+    "qualifier one": "qualifier_1",
+    "first qualifier": "qualifier_1",
+    "1st qualifier": "qualifier_1",
+    "q1": "qualifier_1",
+    "qualifier_2": "qualifier_2",
+    "qualifier 2": "qualifier_2",
+    "qualifier-2": "qualifier_2",
+    "qualifier two": "qualifier_2",
+    "second qualifier": "qualifier_2",
+    "2nd qualifier": "qualifier_2",
+    "q2": "qualifier_2",
+    "eliminator": "eliminator",
+    "elimination final": "eliminator",
+    "elimination match": "eliminator",
+    "final": "final",
+}
+
+
+def normalize_playoff_stage(stage: str) -> Optional[str]:
+    """Normalize a canonical or raw stage string to one of the four IPL playoff stage keys."""
+    if not isinstance(stage, str):
+        return None
+    cleaned = " ".join(stage.strip().lower().split())
+    return _PLAYOFF_STAGE_ALIASES.get(cleaned)
+
+
+def resolve_playoff_match(season: str, stage: str) -> Dict[str, Any]:
+    """
+    Resolve an IPL playoff match for a season and canonical stage using DB stage metadata.
+
+    Checks both ``matches.stage`` and ``matches.raw_json->'info'->'event'->>'stage'``.
+    Never guesses from match order or participating teams when stage metadata is missing.
+    """
+    if not isinstance(season, str) or not season.strip():
+        raise ValueError("Season must be a non-empty string.")
+
+    canonical_stage = normalize_playoff_stage(stage)
+    if canonical_stage is None:
+        raise ValueError(
+            "Playoff stage must be one of: Qualifier 1, Qualifier 2, Eliminator, or Final."
+        )
+
+    requested_season = season.strip()
+    db_stage_values = list(PLAYOFF_STAGE_DB_VALUES[canonical_stage])
+    stage_label = PLAYOFF_STAGE_LABELS[canonical_stage]
+
+    query = """
+        WITH staged_matches AS (
+            SELECT
+                m.match_id,
+                m.season,
+                m.match_date,
+                COALESCE(
+                    NULLIF(TRIM(m.stage), ''),
+                    NULLIF(TRIM(m.raw_json->'info'->'event'->>'stage'), '')
+                ) AS resolved_stage,
+                w.canonical_name AS winner,
+                m.result_type,
+                m.result_method,
+                m.win_by_runs,
+                m.win_by_wickets
+            FROM matches m
+            LEFT JOIN teams w ON w.team_id = m.winner_id
+            WHERE m.season = %s
+        )
+        SELECT
+            match_id,
+            season,
+            match_date,
+            resolved_stage,
+            winner,
+            result_type,
+            result_method,
+            win_by_runs,
+            win_by_wickets
+        FROM staged_matches
+        WHERE resolved_stage = ANY(%s)
+        ORDER BY match_date ASC, match_id ASC;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (requested_season, db_stage_values))
+            rows = cur.fetchall()
+
+    columns = [
+        "match_id",
+        "season",
+        "match_date",
+        "stage",
+        "winner",
+        "result_type",
+        "result_method",
+        "win_by_runs",
+        "win_by_wickets",
+    ]
+    matches: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(zip(columns, row))
+        if hasattr(item.get("match_date"), "isoformat"):
+            item["match_date"] = item["match_date"].isoformat()
+        matches.append(item)
+
+    status = "resolved" if len(matches) == 1 else ("ambiguous" if len(matches) > 1 else "not_found")
+    return {
+        "status": status,
+        "season": requested_season,
+        "stage": canonical_stage,
+        "stage_label": stage_label,
+        "match": matches[0] if len(matches) == 1 else None,
+        "matches": matches,
+    }

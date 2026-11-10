@@ -599,6 +599,269 @@ class TestCutoffAwareAnswerServices(unittest.TestCase):
         self.assertIn("2016", result)
 
 
+class TestScorecardFormattingAndSeasonFinal(unittest.TestCase):
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_match_wickets")
+    @patch("app.ai.answer_service.get_match_scorecard")
+    def test_answer_scorecard_question_formats_full_scorecard_and_fow(
+        self, mock_sc, mock_wk, mock_gen
+    ):
+        mock_sc.return_value = {
+            "match": {
+                "match_id": 1426312,
+                "season": "2024",
+                "stage": "Final",
+                "match_date": "2024-05-26",
+                "venue": "MA Chidambaram Stadium",
+                "city": "Chennai",
+                "teams": [
+                    {"team_name": "Sunrisers Hyderabad"},
+                    {"team_name": "Kolkata Knight Riders"},
+                ],
+                "toss": {"toss_winner_name": "Sunrisers Hyderabad", "toss_decision": "bat"},
+                "result": {"summary": "Kolkata Knight Riders won by 8 wickets"},
+            },
+            "has_super_over": False,
+            "innings": [
+                {
+                    "innings_number": 1,
+                    "batting_team": "Sunrisers Hyderabad",
+                    "total_runs": 113,
+                    "total_wickets": 10,
+                    "overs": "18.3",
+                    "run_rate": "6.11",
+                    "batting": [
+                        {
+                            "player_name": "PJ Cummins",
+                            "dismissal": "c Starc b Russell",
+                            "runs": 24,
+                            "balls": 19,
+                            "fours": 2,
+                            "sixes": 1,
+                            "strike_rate": "126.32",
+                        }
+                    ],
+                    "bowling": [
+                        {
+                            "player_name": "MA Starc",
+                            "overs": "3.0",
+                            "maidens": 0,
+                            "runs_conceded": 14,
+                            "wickets": 2,
+                            "economy": "4.67",
+                        }
+                    ],
+                    "extras": {
+                        "total_extras": 13,
+                        "wides": 6,
+                        "no_balls": 0,
+                        "byes": 4,
+                        "leg_byes": 3,
+                        "penalty": 0,
+                    },
+                },
+                {
+                    "innings_number": 2,
+                    "batting_team": "Kolkata Knight Riders",
+                    "total_runs": 114,
+                    "total_wickets": 2,
+                    "overs": "10.3",
+                    "run_rate": "10.86",
+                    "batting": [
+                        {
+                            "player_name": "VR Iyer",
+                            "dismissal": "not out",
+                            "runs": 52,
+                            "balls": 26,
+                            "fours": 4,
+                            "sixes": 3,
+                            "strike_rate": "200.00",
+                        }
+                    ],
+                    "bowling": [
+                        {
+                            "player_name": "PJ Cummins",
+                            "overs": "2.0",
+                            "maidens": 0,
+                            "runs_conceded": 18,
+                            "wickets": 1,
+                            "economy": "9.00",
+                        }
+                    ],
+                    "extras": {
+                        "total_extras": 8,
+                        "wides": 5,
+                        "no_balls": 1,
+                        "byes": 0,
+                        "leg_byes": 2,
+                        "penalty": 0,
+                    },
+                },
+            ],
+            "super_overs": [],
+        }
+        mock_wk.return_value = {
+            "match_id": 1426312,
+            "has_super_over": False,
+            "innings": [
+                {
+                    "innings_number": 1,
+                    "fall_of_wickets": [
+                        {"wicket_number": 1, "score": 2, "player_name": "Abhishek Sharma", "overs": "0.5"}
+                    ],
+                },
+                {
+                    "innings_number": 2,
+                    "fall_of_wickets": [
+                        {"wicket_number": 1, "score": 11, "player_name": "SP Narine", "overs": "1.2"}
+                    ],
+                },
+            ],
+            "super_overs": [],
+        }
+
+        from app.ai.answer_service import answer_scorecard_question
+        result = answer_scorecard_question(1426312)
+
+        mock_gen.assert_not_called()
+        self.assertIn("IPL 2024 Final Match 1426312 - Scorecard", result)
+        self.assertIn("**Fixture:** Sunrisers Hyderabad vs Kolkata Knight Riders", result)
+        self.assertIn("**Result:** Kolkata Knight Riders won by 8 wickets", result)
+        self.assertIn("Innings 1 - Sunrisers Hyderabad", result)
+        self.assertIn("Innings 2 - Kolkata Knight Riders", result)
+        self.assertIn("**Extras:** 13", result)
+        self.assertIn("**Fall of wickets:** 1-2 (Abhishek Sharma, 0.5 ov)", result)
+        self.assertIn("**Fall of wickets:** 1-11 (SP Narine, 1.2 ov)", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_match_scorecard", return_value=None)
+    def test_answer_scorecard_question_returns_clear_sql_error_when_missing(
+        self, _mock_sc, mock_gen
+    ):
+        from app.ai.answer_service import answer_scorecard_question
+        result = answer_scorecard_question(999999)
+        mock_gen.assert_not_called()
+        self.assertEqual(result, "No scorecard found for match 999999.")
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.answer_scorecard_question", return_value="## IPL 2024 Final Match 1426312 - Scorecard")
+    @patch("app.ai.answer_service.get_season_winner")
+    def test_answer_season_final_detail_resolves_match_id_via_sql(
+        self, mock_winner, mock_sc_answer, mock_gen
+    ):
+        mock_winner.return_value = {"season": "2024", "match_id": 1426312, "stage": "Final"}
+        from app.ai.answer_service import answer_season_final_detail_question
+        result = answer_season_final_detail_question("2024", detail_type="scorecard")
+        mock_winner.assert_called_once_with("2024")
+        mock_sc_answer.assert_called_once_with(1426312)
+        mock_gen.assert_not_called()
+        self.assertIn("1426312", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_season_winner", return_value=None)
+    def test_answer_season_final_detail_returns_error_when_final_missing(
+        self, _mock_winner, mock_gen
+    ):
+        from app.ai.answer_service import answer_season_final_detail_question
+        result = answer_season_final_detail_question("2099", detail_type="scorecard")
+        mock_gen.assert_not_called()
+        self.assertEqual(result, "No IPL final match record was found in the database for season 2099.")
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_season_winner")
+    @patch("app.ai.answer_service.answer_scorecard_question", return_value="## IPL 2024 Qualifier 2 Match 1426311 - Scorecard")
+    @patch("app.ai.answer_service.resolve_playoff_match")
+    def test_answer_playoff_match_question_resolves_qualifier_2_scorecard_without_season_winner(
+        self, mock_resolve, mock_sc, mock_winner, mock_gen
+    ):
+        mock_resolve.return_value = {
+            "status": "resolved",
+            "season": "2024",
+            "stage": "qualifier_2",
+            "stage_label": "Qualifier 2",
+            "match": {"match_id": 1426311, "stage": "Qualifier 2"},
+            "matches": [{"match_id": 1426311, "stage": "Qualifier 2"}],
+        }
+        from app.ai.answer_service import answer_playoff_match_question
+        result = answer_playoff_match_question("2024", "qualifier_2", detail_type="scorecard")
+        mock_resolve.assert_called_once_with("2024", "qualifier_2")
+        mock_sc.assert_called_once_with(1426311)
+        mock_winner.assert_not_called()
+        mock_gen.assert_not_called()
+        self.assertIn("1426311", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_match_details")
+    @patch("app.ai.answer_service.resolve_playoff_match")
+    def test_answer_playoff_match_question_formats_summary_via_sql(
+        self, mock_resolve, mock_details, mock_gen
+    ):
+        mock_resolve.return_value = {
+            "status": "resolved",
+            "season": "2024",
+            "stage": "qualifier_2",
+            "stage_label": "Qualifier 2",
+            "match": {"match_id": 1426311, "stage": "Qualifier 2"},
+            "matches": [{"match_id": 1426311, "stage": "Qualifier 2"}],
+        }
+        mock_details.return_value = {
+            "match_id": 1426311,
+            "season": "2024",
+            "match_date": "2024-05-24",
+            "venue": "MA Chidambaram Stadium",
+            "city": "Chennai",
+            "stage": "Qualifier 2",
+            "teams": [
+                {"team_name": "Sunrisers Hyderabad"},
+                {"team_name": "Rajasthan Royals"},
+            ],
+            "toss": {"toss_winner_name": "Rajasthan Royals", "toss_decision": "field"},
+            "result": {"summary": "Sunrisers Hyderabad won by 36 runs"},
+        }
+        from app.ai.answer_service import answer_playoff_match_question
+        result = answer_playoff_match_question("2024", "qualifier_2", detail_type="summary")
+        mock_details.assert_called_once_with(1426311)
+        mock_gen.assert_not_called()
+        self.assertIn("IPL 2024 Qualifier 2 (Match 1426311)", result)
+        self.assertIn("**Fixture:** Sunrisers Hyderabad vs Rajasthan Royals", result)
+        self.assertIn("**Result:** Sunrisers Hyderabad won by 36 runs", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.resolve_playoff_match")
+    def test_answer_playoff_match_question_handles_not_found_and_ambiguous(
+        self, mock_resolve, mock_gen
+    ):
+        from app.ai.answer_service import answer_playoff_match_question
+
+        mock_resolve.return_value = {
+            "status": "not_found",
+            "season": "2007/08",
+            "stage": "qualifier_2",
+            "stage_label": "Qualifier 2",
+            "match": None,
+            "matches": [],
+        }
+        missing_res = answer_playoff_match_question("2007/08", "qualifier_2", detail_type="scorecard")
+        self.assertIn("No Qualifier 2 match record was found", missing_res)
+
+        mock_resolve.return_value = {
+            "status": "ambiguous",
+            "season": "2024",
+            "stage": "qualifier_2",
+            "stage_label": "Qualifier 2",
+            "match": None,
+            "matches": [
+                {"match_id": 1001, "match_date": "2024-05-23"},
+                {"match_id": 1002, "match_date": "2024-05-24"},
+            ],
+        }
+        ambig_res = answer_playoff_match_question("2024", "qualifier_2", detail_type="scorecard")
+        self.assertIn("Multiple Qualifier 2 records", ambig_res)
+        self.assertIn("1001", ambig_res)
+        mock_gen.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
 

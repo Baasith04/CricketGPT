@@ -227,3 +227,86 @@ def test_get_match_wickets_invalid_id():
     with pytest.raises(ValueError):
         scorecard_service.get_match_wickets("335982")
 
+
+# ---------------------------------------------------------------------------
+# Playoff Stage Resolution Tests
+# ---------------------------------------------------------------------------
+
+def test_normalize_playoff_stage_distinguishes_all_four_stages():
+    assert match_service.normalize_playoff_stage("Qualifier 1") == "qualifier_1"
+    assert match_service.normalize_playoff_stage("1st Qualifier") == "qualifier_1"
+    assert match_service.normalize_playoff_stage("Second Qualifier") == "qualifier_2"
+    assert match_service.normalize_playoff_stage("Qualifier-2") == "qualifier_2"
+    assert match_service.normalize_playoff_stage("Eliminator") == "eliminator"
+    assert match_service.normalize_playoff_stage("Elimination Final") == "eliminator"
+    assert match_service.normalize_playoff_stage("Final") == "final"
+    assert match_service.normalize_playoff_stage("Qualifier") is None
+    assert match_service.normalize_playoff_stage("Semi Final") is None
+
+
+@patch("app.services.matches.match_service.get_db_connection")
+def test_resolve_playoff_match_qualifier_2_resolved(mock_conn):
+    cur = mock_conn.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cur.fetchall.return_value = [
+        (1426311, "2024", date(2024, 5, 24), "Qualifier 2", "Sunrisers Hyderabad", "runs", None, 36, None),
+    ]
+
+    result = match_service.resolve_playoff_match("2024", "second qualifier")
+
+    assert result["status"] == "resolved"
+    assert result["stage"] == "qualifier_2"
+    assert result["match"]["match_id"] == 1426311
+    assert result["match"]["stage"] == "Qualifier 2"
+    executed_params = cur.execute.call_args.args[1]
+    assert executed_params == ("2024", ["Qualifier 2"])
+
+
+@patch("app.services.matches.match_service.get_db_connection")
+def test_resolve_playoff_match_eliminator_supports_elimination_final(mock_conn):
+    cur = mock_conn.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cur.fetchall.return_value = [
+        (981015, "2016", date(2016, 5, 25), "Elimination Final", "Sunrisers Hyderabad", "runs", None, 22, None),
+    ]
+
+    result = match_service.resolve_playoff_match("2016", "eliminator")
+
+    assert result["status"] == "resolved"
+    assert result["match"]["match_id"] == 981015
+    assert result["match"]["stage"] == "Elimination Final"
+    executed_params = cur.execute.call_args.args[1]
+    assert executed_params == ("2016", ["Eliminator", "Elimination Final"])
+
+
+@patch("app.services.matches.match_service.get_db_connection")
+def test_resolve_playoff_match_missing_returns_not_found_without_guessing(mock_conn):
+    cur = mock_conn.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cur.fetchall.return_value = []
+
+    result = match_service.resolve_playoff_match("2007/08", "qualifier_2")
+
+    assert result["status"] == "not_found"
+    assert result["match"] is None
+    assert result["matches"] == []
+
+
+@patch("app.services.matches.match_service.get_db_connection")
+def test_resolve_playoff_match_multiple_rows_returns_ambiguous(mock_conn):
+    cur = mock_conn.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+    cur.fetchall.return_value = [
+        (1001, "2024", date(2024, 5, 23), "Qualifier 2", "Team A", "runs", None, 10, None),
+        (1002, "2024", date(2024, 5, 24), "Qualifier 2", "Team B", "wickets", None, None, 5),
+    ]
+
+    result = match_service.resolve_playoff_match("2024", "qualifier_2")
+
+    assert result["status"] == "ambiguous"
+    assert result["match"] is None
+    assert len(result["matches"]) == 2
+
+
+def test_resolve_playoff_match_invalid_inputs_raise():
+    with pytest.raises(ValueError):
+        match_service.resolve_playoff_match("", "qualifier_2")
+    with pytest.raises(ValueError):
+        match_service.resolve_playoff_match("2024", "semi_final")
+
