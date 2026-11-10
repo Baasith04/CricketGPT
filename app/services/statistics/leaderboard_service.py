@@ -35,8 +35,10 @@ BATTING_ORDER = {
     "highest_score": "highest_score DESC, total_runs DESC",
     "sixes": "sixes DESC, total_runs DESC",
     "fours": "fours DESC, total_runs DESC",
-    "average": "batting_average DESC, total_runs DESC",
-    "strike_rate": "strike_rate DESC, total_runs DESC",
+    "average": "batting_average DESC NULLS LAST, total_runs DESC",
+    "strike_rate": "strike_rate DESC NULLS LAST, total_runs DESC",
+    "centuries": "centuries DESC, fifties DESC, total_runs DESC",
+    "fifties": "fifties DESC, centuries DESC, total_runs DESC",
 }
 
 
@@ -50,7 +52,7 @@ def get_batting_leaderboard(
     Return an IPL batting leaderboard.
 
     Categories:
-    runs, highest_score, sixes, fours, average, strike_rate.
+    runs, highest_score, sixes, fours, average, strike_rate, centuries, fifties.
     """
 
     _validate_limit(limit)
@@ -114,16 +116,16 @@ def get_batting_leaderboard(
                 dw.player_dismissed_id AS player_id,
                 COUNT(DISTINCT dw.wicket_id) AS dismissals
             FROM delivery_wickets dw
-            JOIN matches m
-                ON m.match_id = dw.match_id
-            JOIN innings i
-                ON i.match_id = dw.match_id
             JOIN deliveries d
                 ON d.delivery_id = dw.delivery_id
-                AND d.innings_id = i.innings_id
+            JOIN innings i
+                ON i.innings_id = d.innings_id
+            JOIN matches m
+                ON m.match_id = d.match_id
             WHERE
                 (%s::varchar IS NULL OR m.season = %s::varchar)
                 AND i.is_super_over = FALSE
+                AND LOWER(dw.dismissal_kind) <> 'retired hurt'
             GROUP BY dw.player_dismissed_id
         ),
 
@@ -140,10 +142,16 @@ def get_batting_leaderboard(
                 d.innings_id
         ),
 
-        highest_scores AS (
+        milestone_stats AS (
             SELECT
                 player_id,
-                MAX(innings_score) AS highest_score
+                MAX(innings_score) AS highest_score,
+                COUNT(*) FILTER (
+                    WHERE innings_score >= 50 AND innings_score < 100
+                ) AS fifties,
+                COUNT(*) FILTER (
+                    WHERE innings_score >= 100
+                ) AS centuries
             FROM innings_scores
             GROUP BY player_id
         )
@@ -158,7 +166,10 @@ def get_batting_leaderboard(
             b.balls_faced,
             b.fours,
             b.sixes,
+            COALESCE(h.fifties, 0) AS fifties,
+            COALESCE(h.centuries, 0) AS centuries,
             COALESCE(ds.dismissals, 0) AS dismissals,
+            GREATEST(b.innings_batted - COALESCE(ds.dismissals, 0), 0) AS not_outs,
 
             CASE
                 WHEN COALESCE(ds.dismissals, 0) > 0
@@ -181,7 +192,7 @@ def get_batting_leaderboard(
         FROM batting b
         LEFT JOIN dismissals ds
             ON ds.player_id = b.player_id
-        LEFT JOIN highest_scores h
+        LEFT JOIN milestone_stats h
             ON h.player_id = b.player_id
         WHERE b.balls_faced >= %s
         ORDER BY {order_by}
@@ -199,6 +210,7 @@ BOWLING_ORDER = {
     "economy": "economy ASC NULLS LAST, wickets DESC",
     "average": "bowling_average ASC NULLS LAST, wickets DESC",
     "strike_rate": "bowling_strike_rate ASC NULLS LAST, wickets DESC",
+    "five_wickets": "five_wickets DESC, wickets DESC, economy ASC NULLS LAST",
 }
 
 
@@ -212,7 +224,7 @@ def get_bowling_leaderboard(
     Return an IPL bowling leaderboard.
 
     Categories:
-    wickets, economy, average, strike_rate.
+    wickets, economy, average, strike_rate, five_wickets.
     """
 
     _validate_limit(limit)
@@ -272,15 +284,25 @@ def get_bowling_leaderboard(
                 p.canonical_name
         ),
 
-        wickets AS (
+        innings_wickets AS (
             SELECT
                 d.bowler_id AS player_id,
-                COUNT(DISTINCT dw.wicket_id) AS wickets
+                d.innings_id,
+                COUNT(DISTINCT dw.wicket_id) AS wkts
             FROM filtered_deliveries d
             JOIN delivery_wickets dw
                 ON dw.delivery_id = d.delivery_id
             WHERE dw.is_bowler_credit = TRUE
-            GROUP BY d.bowler_id
+            GROUP BY d.bowler_id, d.innings_id
+        ),
+
+        wickets AS (
+            SELECT
+                player_id,
+                SUM(wkts) AS wickets,
+                COUNT(*) FILTER (WHERE wkts >= 5) AS five_wickets
+            FROM innings_wickets
+            GROUP BY player_id
         )
 
         SELECT
@@ -291,6 +313,7 @@ def get_bowling_leaderboard(
             b.legal_balls,
             b.runs_conceded,
             COALESCE(w.wickets, 0) AS wickets,
+            COALESCE(w.five_wickets, 0) AS five_wickets,
 
             (
                 b.legal_balls / 6
@@ -433,6 +456,92 @@ def get_best_bowling_figures(season=None, limit=10):
             f.runs_conceded ASC,
             f.legal_balls ASC
 
+        LIMIT %s
+    """
+
+    return _fetch_all(query, (season, season, limit))
+
+
+def get_highest_individual_scores(season=None, limit=10):
+    """Return top individual innings scores in IPL history (excluding Super Overs)."""
+
+    _validate_limit(limit)
+    _validate_season(season)
+
+    query = """
+        WITH innings_knocks AS (
+            SELECT
+                d.batter_id AS player_id,
+                p.canonical_name AS player_name,
+                d.match_id,
+                m.season,
+                m.match_date,
+                d.innings_id,
+                bt.canonical_name AS batting_team,
+                bw.canonical_name AS opponent,
+                SUM(d.batter_runs) AS runs,
+                COUNT(*) FILTER (WHERE d.wide_runs = 0) AS balls_faced,
+                COUNT(*) FILTER (WHERE d.batter_runs = 4) AS fours,
+                COUNT(*) FILTER (WHERE d.batter_runs = 6) AS sixes
+            FROM deliveries d
+            JOIN innings i
+                ON i.innings_id = d.innings_id
+            JOIN matches m
+                ON m.match_id = d.match_id
+            JOIN players p
+                ON p.player_id = d.batter_id
+            JOIN teams bt
+                ON bt.team_id = i.batting_team_id
+            JOIN teams bw
+                ON bw.team_id = i.bowling_team_id
+            WHERE
+                (%s::varchar IS NULL OR m.season = %s::varchar)
+                AND i.is_super_over = FALSE
+            GROUP BY
+                d.batter_id,
+                p.canonical_name,
+                d.match_id,
+                m.season,
+                m.match_date,
+                d.innings_id,
+                bt.canonical_name,
+                bw.canonical_name
+        ),
+        dismissals_in_innings AS (
+            SELECT
+                d.innings_id,
+                dw.player_dismissed_id AS player_id,
+                BOOL_OR(LOWER(dw.dismissal_kind) <> 'retired hurt') AS is_out
+            FROM delivery_wickets dw
+            JOIN deliveries d
+                ON d.delivery_id = dw.delivery_id
+            GROUP BY d.innings_id, dw.player_dismissed_id
+        )
+        SELECT
+            ik.player_id,
+            ik.player_name,
+            ik.match_id,
+            ik.season,
+            ik.match_date,
+            ik.batting_team,
+            ik.opponent,
+            ik.runs,
+            ik.balls_faced,
+            ik.fours,
+            ik.sixes,
+            ROUND(
+                ik.runs::numeric * 100 / NULLIF(ik.balls_faced, 0),
+                2
+            ) AS strike_rate,
+            COALESCE(di.is_out, FALSE) AS is_out
+        FROM innings_knocks ik
+        LEFT JOIN dismissals_in_innings di
+            ON di.innings_id = ik.innings_id
+           AND di.player_id = ik.player_id
+        ORDER BY
+            ik.runs DESC,
+            ik.balls_faced ASC,
+            ik.match_date DESC
         LIMIT %s
     """
 

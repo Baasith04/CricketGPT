@@ -14,9 +14,11 @@ psycopg[binary]==3.3.8
 # Environment variables loader
 python-dotenv==1.2.4
 
-# AI providers
+# AI & Hybrid RAG
 google-genai==2.34.0
 openai==3.48.0
+pgvector==0.5.1
+pypdf==7.0.0
 
 # Testing & HTTP client
 pytest==9.2.0

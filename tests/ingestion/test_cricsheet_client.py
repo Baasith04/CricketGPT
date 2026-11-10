@@ -119,3 +119,60 @@ def test_scan_rejects_duplicate_match_ids(tmp_path):
 
     assert len(result["matches"]) == 1
     assert len(result["rejected"]) == 1
+
+
+def test_download_retries_transient_http_503_and_succeeds(tmp_path):
+    import io
+    from unittest.mock import patch
+    from urllib.error import HTTPError
+    from app.ingestion.sync.cricsheet_client import download_ipl_archive
+
+    zip_path = create_test_archive(tmp_path, {"123456.json": '{"meta":{"revision":1}}'})
+    valid_zip_bytes = zip_path.read_bytes()
+    dest = tmp_path / "downloaded.zip"
+
+    good_resp = io.BytesIO(valid_zip_bytes)
+    good_resp.__enter__ = lambda s: s
+    good_resp.__exit__ = lambda s, *a: None
+
+    transient_err = HTTPError(
+        url="https://cricsheet.org/downloads/ipl_json.zip",
+        code=503,
+        msg="Service Unavailable",
+        hdrs=None,
+        fp=None,
+    )
+
+    with patch("app.ingestion.sync.cricsheet_client.time.sleep") as mock_sleep, \
+         patch("app.ingestion.sync.cricsheet_client.urlopen", side_effect=[transient_err, good_resp]) as mock_open:
+        result = download_ipl_archive(dest, max_attempts=3, base_delay=0.1)
+
+    assert result == dest
+    assert dest.is_file()
+    assert mock_open.call_count == 2
+    mock_sleep.assert_called_once_with(0.1)
+
+
+def test_download_does_not_retry_permanent_http_404(tmp_path):
+    from unittest.mock import patch
+    from urllib.error import HTTPError
+    from app.ingestion.sync.cricsheet_client import download_ipl_archive
+
+    dest = tmp_path / "downloaded_404.zip"
+    perm_err = HTTPError(
+        url="https://cricsheet.org/downloads/ipl_json.zip",
+        code=404,
+        msg="Not Found",
+        hdrs=None,
+        fp=None,
+    )
+
+    with patch("app.ingestion.sync.cricsheet_client.time.sleep") as mock_sleep, \
+         patch("app.ingestion.sync.cricsheet_client.urlopen", side_effect=perm_err) as mock_open:
+        with pytest.raises(HTTPError):
+            download_ipl_archive(dest, max_attempts=3, base_delay=0.1)
+
+    assert mock_open.call_count == 1
+    mock_sleep.assert_not_called()
+    assert not dest.exists()
+    assert not dest.with_suffix(".zip.part").exists()

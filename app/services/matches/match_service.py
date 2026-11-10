@@ -217,3 +217,18 @@ def get_match_details(match_id: int) -> Optional[Dict[str, Any]]:
             "summary": summary,
         },
     }
+
+
+def get_latest_season() -> Optional[str]:
+    """Return the most recent IPL season present in Supabase."""
+    query = """
+        SELECT season
+        FROM matches
+        ORDER BY match_date DESC, match_id DESC
+        LIMIT 1;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            row = cur.fetchone()
+    return str(row[0]).strip() if row and row[0] is not None else None

@@ -12,6 +12,8 @@ from app.ingestion.sync.cricsheet_client import (
     scan_ipl_archive,
 )
 from app.ingestion.sync.sync_planner import create_sync_plan
+from app.ingestion.validators.scorecard_validator import validate_imported_match
+from app.rag.pipeline.rag_pipeline import ingest_db_match_summaries
 
 logger = logging.getLogger(__name__)
 
@@ -78,20 +80,152 @@ def _update_sync_history(
         conn.commit()
 
 
+def _extract_failed_rag_match_ids(error_details: Any) -> List[int]:
+    """Extract failed RAG match IDs from a stored `sync_history.error_details` payload."""
+    items = []
+    if isinstance(error_details, list):
+        items = error_details
+    elif isinstance(error_details, dict):
+        items = error_details.get("errors") or []
+
+    match_ids: List[int] = []
+    for entry in items:
+        if not isinstance(entry, dict) or entry.get("stage") != "rag":
+            continue
+        mid = entry.get("match_id")
+        if isinstance(mid, int) and not isinstance(mid, bool) and mid > 0:
+            match_ids.append(mid)
+        for batch_mid in entry.get("match_ids") or []:
+            if isinstance(batch_mid, int) and not isinstance(batch_mid, bool) and batch_mid > 0:
+                match_ids.append(batch_mid)
+    return list(dict.fromkeys(match_ids))
+
+
+def retry_failed_rag_sync(
+    sync_id: Optional[int] = None,
+    match_ids: Optional[List[int]] = None,
+    triggered_by: str = "manual",
+) -> Dict[str, Any]:
+    """
+    Retry failed RAG match-summary ingestion for a prior `sync_history` entry
+    (or explicit match IDs) without re-downloading or rewriting SQL tables.
+    """
+    if triggered_by not in VALID_TRIGGERS:
+        raise ValueError(
+            f"Invalid triggered_by '{triggered_by}'. "
+            f"Must be one of: {', '.join(sorted(VALID_TRIGGERS))}."
+        )
+
+    target_ids: List[int] = []
+    source_sync_id: Optional[int] = sync_id
+
+    if match_ids is not None:
+        target_ids = list(
+            dict.fromkeys(
+                int(mid) for mid in match_ids
+                if isinstance(mid, int) and not isinstance(mid, bool) and mid > 0
+            )
+        )
+    else:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if sync_id is not None:
+                    cur.execute(
+                        "SELECT sync_id, error_details FROM sync_history WHERE sync_id = %s;",
+                        (sync_id,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        source_sync_id = row[0]
+                        target_ids = _extract_failed_rag_match_ids(row[1])
+                else:
+                    cur.execute(
+                        """
+                        SELECT sync_id, error_details
+                        FROM sync_history
+                        WHERE error_details IS NOT NULL
+                        ORDER BY sync_id DESC
+                        LIMIT 20;
+                        """
+                    )
+                    for row in cur.fetchall():
+                        found = _extract_failed_rag_match_ids(row[1])
+                        if found:
+                            source_sync_id = row[0]
+                            target_ids = found
+                            break
+
+    if not target_ids:
+        return {
+            "source_sync_id": source_sync_id,
+            "sync_id": None,
+            "status": "no_failed_rag_matches",
+            "retried_match_ids": [],
+            "rag_ingested": 0,
+            "rag_updated": 0,
+            "rag_unchanged": 0,
+            "rag_failed": 0,
+            "rag_failed_match_ids": [],
+        }
+
+    retry_sync_id = _insert_sync_history(triggered_by)
+    errors: List[Dict[str, Any]] = []
+    rag_counts = {"ingested": 0, "updated": 0, "unchanged": 0, "failed": 0}
+    rag_failed_ids: List[int] = []
+
+    try:
+        rag_result = ingest_db_match_summaries(match_ids=target_ids)
+        rag_counts = rag_result["counts"]
+        rag_failed_ids = rag_result.get("failed_match_ids", [])
+        for err in rag_result.get("errors", []):
+            errors.append({"stage": "rag", **err})
+    except Exception as exc:
+        logger.error("RAG retry ingestion failed: %s", exc)
+        rag_counts["failed"] = len(target_ids)
+        rag_failed_ids = list(target_ids)
+        errors.append(
+            {
+                "stage": "rag",
+                "match_ids": list(target_ids),
+                "error": str(exc),
+            }
+        )
+
+    final_status = "partial_failure" if rag_failed_ids else "success"
+    _update_sync_history(
+        sync_id=retry_sync_id,
+        status=final_status,
+        files_checked=len(target_ids),
+        error_details=errors if errors else None,
+    )
+
+    return {
+        "source_sync_id": source_sync_id,
+        "sync_id": retry_sync_id,
+        "status": final_status,
+        "retried_match_ids": target_ids,
+        "rag_ingested": rag_counts["ingested"],
+        "rag_updated": rag_counts["updated"],
+        "rag_unchanged": rag_counts["unchanged"],
+        "rag_failed": rag_counts["failed"],
+        "rag_failed_match_ids": rag_failed_ids,
+        "errors": errors,
+    }
+
+
 def run_sync(
     dry_run: bool = False,
     triggered_by: str = "cron",
+    sync_rag: bool = True,
 ) -> Dict[str, Any]:
     """
     Run the full Cricsheet IPL synchronization cycle:
-    download archive -> scan JSONs -> compare against sync_files -> import new/changed.
+    download archive -> scan JSONs -> compare against sync_files ->
+    import new/changed into SQL -> validate scorecards ->
+    incrementally ingest match summaries into pgvector RAG.
 
-    Args:
-        dry_run: If True, inspect and classify without writing to the database.
-        triggered_by: One of 'cron', 'manual', or 'initial_import'.
-
-    Returns:
-        Summary dictionary with sync_id (None for dry_run), status, and match counts.
+    A RAG failure never rolls back or deletes successfully committed SQL matches;
+    instead it is recorded in `sync_history` for later retry.
     """
     if triggered_by not in VALID_TRIGGERS:
         raise ValueError(
@@ -109,6 +243,11 @@ def run_sync(
     matches_updated = 0
     matches_skipped = 0
     matches_failed = 0
+    validation_passed = 0
+    validation_failed = 0
+    changed_match_ids: List[int] = []
+    rag_counts = {"ingested": 0, "updated": 0, "unchanged": 0, "failed": 0}
+    rag_failed_match_ids: List[int] = []
     errors: List[Dict[str, Any]] = []
 
     try:
@@ -161,10 +300,38 @@ def run_sync(
                     result_status = outcome["status"]
                     if result_status == "imported":
                         matches_inserted += 1
+                        changed_match_ids.append(match_id)
                     elif result_status == "updated":
                         matches_updated += 1
+                        changed_match_ids.append(match_id)
                     else:
                         matches_skipped += 1
+                        continue
+
+                    try:
+                        val = validate_imported_match(match_id)
+                        if val["is_valid"]:
+                            validation_passed += 1
+                        else:
+                            validation_failed += 1
+                            errors.append(
+                                {
+                                    "stage": "validation",
+                                    "match_id": match_id,
+                                    "invalid_innings": val["invalid_innings"],
+                                    "details": val["results"],
+                                }
+                            )
+                    except Exception as val_exc:
+                        validation_failed += 1
+                        logger.error("Scorecard validation failed for match %s: %s", match_id, val_exc)
+                        errors.append(
+                            {
+                                "stage": "validation",
+                                "match_id": match_id,
+                                "error": str(val_exc),
+                            }
+                        )
                 except Exception as exc:
                     matches_failed += 1
                     logger.error(
@@ -181,9 +348,46 @@ def run_sync(
                         }
                     )
 
+            # Deduplicate changed match IDs cleanly before incremental RAG ingestion.
+            changed_match_ids = list(dict.fromkeys(changed_match_ids))
+
+            if sync_rag and changed_match_ids:
+                logger.info(
+                    "Running incremental RAG summary ingestion for %d changed match(es)...",
+                    len(changed_match_ids),
+                )
+                try:
+                    rag_result = ingest_db_match_summaries(match_ids=changed_match_ids)
+                    rag_counts = rag_result["counts"]
+                    rag_failed_match_ids = rag_result.get("failed_match_ids", [])
+                    for rag_err in rag_result.get("errors", []):
+                        errors.append({"stage": "rag", **rag_err})
+                except Exception as rag_exc:
+                    # Do NOT roll back committed SQL matches; record RAG failure for later retry.
+                    logger.error(
+                        "Incremental RAG ingestion failed after SQL sync (%d matches): %s",
+                        len(changed_match_ids),
+                        rag_exc,
+                    )
+                    rag_counts["failed"] = len(changed_match_ids)
+                    rag_failed_match_ids = list(changed_match_ids)
+                    errors.append(
+                        {
+                            "stage": "rag",
+                            "match_ids": list(changed_match_ids),
+                            "error": str(rag_exc),
+                        }
+                    )
+
             if matches_failed > 0 and (matches_inserted + matches_updated) == 0 and to_process:
                 final_status = "failed"
-            elif matches_failed > 0 or rejected:
+            elif (
+                matches_failed > 0
+                or rejected
+                or validation_failed > 0
+                or rag_counts["failed"] > 0
+                or rag_failed_match_ids
+            ):
                 final_status = "partial_failure"
             else:
                 final_status = "success"
@@ -210,6 +414,14 @@ def run_sync(
                 "matches_updated": matches_updated,
                 "matches_skipped": matches_skipped,
                 "matches_failed": matches_failed,
+                "validation_passed": validation_passed,
+                "validation_failed": validation_failed,
+                "changed_match_ids": changed_match_ids,
+                "rag_ingested": rag_counts["ingested"],
+                "rag_updated": rag_counts["updated"],
+                "rag_unchanged": rag_counts["unchanged"],
+                "rag_failed": rag_counts["failed"],
+                "rag_failed_match_ids": rag_failed_match_ids,
                 "errors": errors,
             }
 
@@ -231,4 +443,3 @@ def run_sync(
             except Exception as db_exc:
                 logger.error("Could not update sync_history failure row: %s", db_exc)
         raise
-

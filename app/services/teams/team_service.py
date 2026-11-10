@@ -28,9 +28,11 @@ def get_team_profile(team_name: str):
             ) AS wins,
             COUNT(DISTINCT m.match_id) FILTER (
                 WHERE m.result_type = 'tie'
+                   OR m.raw_json->'info'->'outcome'->>'result' = 'tie'
             ) AS ties,
             COUNT(DISTINCT m.match_id) FILTER (
                 WHERE m.result_type = 'no result'
+                  AND COALESCE(m.raw_json->'info'->'outcome'->>'result', '') <> 'tie'
             ) AS no_results,
             COUNT(DISTINCT m.match_id) FILTER (
                 WHERE m.winner_id IS NOT NULL

@@ -37,6 +37,16 @@ services:
         sync: false
       - key: NVIDIA_MODEL
         sync: false
+      - key: RAG_EMBEDDING_MODEL
+        value: gemini-embedding-2
+      - key: RAG_EMBEDDING_DIMENSION
+        value: "768"
+      - key: INGESTION_API_KEY
+        sync: false
+      - key: GEMINI_KNOWLEDGE_CUTOFF_DATE
+        value: "2024-03-01"
+      - key: GEMINI_KNOWLEDGE_CUTOFF_SEASON
+        value: "2023"
 
   - type: cron
     name: cricketgpt-cricsheet-sync
@@ -51,4 +61,10 @@ services:
         value: "3.11.9"
       - key: DATABASE_URL
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: RAG_EMBEDDING_MODEL
+        value: gemini-embedding-2
+      - key: RAG_EMBEDDING_DIMENSION
+        value: "768"
 

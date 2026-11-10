@@ -175,10 +175,11 @@ def get_teams_overall_statistics(active_only: bool = False) -> List[Dict[str, An
 
 
 def get_individual_team_statistics(
-    team_identifier: Union[int, str]
+    team_identifier: Union[int, str],
+    season: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Return comprehensive career statistics for an individual IPL team.
+    Return comprehensive career or season-filtered statistics for an individual IPL team.
     Includes overall matches, wins, losses, ties, win percentage,
     non-Super-Over batting and bowling performance stats, and championship seasons.
     """
@@ -187,6 +188,7 @@ def get_individual_team_statistics(
         return None
 
     team_id = team["team_id"]
+    normalized_season = season.strip() if isinstance(season, str) and season.strip() else None
 
     query = """
         WITH match_records AS (
@@ -210,6 +212,7 @@ def get_individual_team_statistics(
             FROM match_teams mt
             JOIN matches m ON m.match_id = mt.match_id
             WHERE mt.team_id = %s
+              AND (%s::varchar IS NULL OR m.season = %s::varchar)
             GROUP BY mt.team_id
         ),
         batting AS (
@@ -220,8 +223,10 @@ def get_individual_team_statistics(
                 SUM(i.total_wickets) AS wickets_lost,
                 SUM(i.legal_balls_bowled) AS legal_balls_faced
             FROM innings i
+            JOIN matches m ON m.match_id = i.match_id
             WHERE i.is_super_over = FALSE
               AND i.batting_team_id = %s
+              AND (%s::varchar IS NULL OR m.season = %s::varchar)
             GROUP BY i.batting_team_id
         ),
         bowling AS (
@@ -232,8 +237,10 @@ def get_individual_team_statistics(
                 SUM(i.total_wickets) AS wickets_taken,
                 SUM(i.legal_balls_bowled) AS legal_balls_bowled
             FROM innings i
+            JOIN matches m ON m.match_id = i.match_id
             WHERE i.is_super_over = FALSE
               AND i.bowling_team_id = %s
+              AND (%s::varchar IS NULL OR m.season = %s::varchar)
             GROUP BY i.bowling_team_id
         ),
         season_winners AS (
@@ -250,6 +257,7 @@ def get_individual_team_statistics(
                 ARRAY_AGG(season ORDER BY season) AS seasons
             FROM season_winners
             WHERE winner_id = %s
+              AND (%s::varchar IS NULL OR season = %s::varchar)
             GROUP BY winner_id
         )
         SELECT
@@ -295,9 +303,17 @@ def get_individual_team_statistics(
         WHERE t.team_id = %s;
     """
 
+    params = (
+        team_id, normalized_season, normalized_season,
+        team_id, normalized_season, normalized_season,
+        team_id, normalized_season, normalized_season,
+        team_id, normalized_season, normalized_season,
+        team_id,
+    )
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (team_id, team_id, team_id, team_id, team_id))
+            cur.execute(query, params)
             row = cur.fetchone()
 
     if not row:
@@ -673,6 +689,57 @@ def get_team_versus_matches(
         "season": normalized_season,
         "matches": matches,
     }
+
+
+def get_team_runs_leaderboard(
+    season: Optional[str] = None,
+    limit: int = 15,
+) -> List[Dict[str, Any]]:
+    """
+    Return teams ranked by total runs scored (excluding Super Overs),
+    optionally filtered by season.
+    """
+    normalized_season = season.strip() if isinstance(season, str) and season.strip() else None
+
+    query = """
+        SELECT
+            t.team_id,
+            t.canonical_name AS team_name,
+            t.short_code,
+            COUNT(DISTINCT i.match_id) AS matches_played,
+            COUNT(i.innings_id) AS innings_batted,
+            COALESCE(SUM(i.total_runs), 0) AS total_runs,
+            COALESCE(SUM(i.total_wickets), 0) AS wickets_lost,
+            COALESCE(SUM(i.legal_balls_bowled), 0) AS legal_balls_faced,
+            ROUND(
+                COALESCE(SUM(i.total_runs), 0)::NUMERIC * 6 /
+                NULLIF(COALESCE(SUM(i.legal_balls_bowled), 0), 0),
+                2
+            ) AS run_rate
+        FROM teams t
+        JOIN innings i
+            ON i.batting_team_id = t.team_id
+        JOIN matches m
+            ON m.match_id = i.match_id
+        WHERE i.is_super_over = FALSE
+          AND (%s::varchar IS NULL OR m.season = %s::varchar)
+        GROUP BY t.team_id, t.canonical_name, t.short_code
+        ORDER BY total_runs DESC, run_rate DESC
+        LIMIT %s;
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (normalized_season, normalized_season, limit))
+            rows = cur.fetchall()
+            columns = [col.name for col in cur.description]
+
+    results = []
+    for row in rows:
+        d = dict(zip(columns, row))
+        d["run_rate"] = float(d["run_rate"]) if d["run_rate"] is not None else 0.0
+        results.append(d)
+    return results
 
 
 def get_team_statistics(team_name: str) -> Optional[Dict[str, Any]]:

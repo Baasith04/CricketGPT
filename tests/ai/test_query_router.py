@@ -267,6 +267,294 @@ class TestRouteQuestion(unittest.TestCase):
         mock_fn.assert_called_once_with("xyz", "mi", season="2024")
         self.assertIn("not found", result)
 
+    # ------------------------------------------------------------------
+    # Extended Batting, Bowling, Player, Team, Match, Advanced intents
+    # ------------------------------------------------------------------
+
+    @patch("app.ai.query_router.router.answer_leaderboard_question")
+    def test_highest_batting_average_routes_to_leaderboard(self, mock_fn):
+        mock_fn.return_value = "Average leaderboard"
+        self._route("Who has the highest batting average?")
+        mock_fn.assert_called_once_with(
+            category="average",
+            question_type="batting",
+            season=None,
+            limit=10,
+        )
+
+    @patch("app.ai.query_router.router.answer_leaderboard_question")
+    def test_most_centuries_routes_to_leaderboard(self, mock_fn):
+        mock_fn.return_value = "Centuries leaderboard"
+        self._route("Who scored the most centuries?")
+        mock_fn.assert_called_once_with(
+            category="centuries",
+            question_type="batting",
+            season=None,
+            limit=10,
+        )
+
+    @patch("app.ai.query_router.router.answer_highest_individual_scores_question")
+    def test_highest_individual_scores_routes(self, mock_fn):
+        mock_fn.return_value = "Individual scores"
+        self._route("Show the highest individual scores.")
+        mock_fn.assert_called_once_with(season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_boundaries_combined_question")
+    def test_sixes_and_fours_combined_routes(self, mock_fn):
+        mock_fn.return_value = "Sixes and fours"
+        self._route("Who scored the most sixes and fours?")
+        mock_fn.assert_called_once_with(season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_leaderboard_question")
+    def test_most_five_wicket_hauls_routes(self, mock_fn):
+        mock_fn.return_value = "5w hauls"
+        self._route("Who has the most five-wicket hauls?")
+        mock_fn.assert_called_once_with(
+            category="five_wickets",
+            question_type="bowling",
+            season=None,
+            limit=10,
+        )
+
+    @patch("app.ai.query_router.router.answer_player_question")
+    def test_player_runs_in_season_routes_with_season(self, mock_fn):
+        mock_fn.return_value = "Kohli 2024"
+        self._route("How many runs did Virat Kohli score in 2024?")
+        mock_fn.assert_called_once_with("Virat Kohli", season="2024")
+
+    @patch("app.ai.query_router.router.answer_player_question")
+    def test_player_matches_played_routes(self, mock_fn):
+        mock_fn.return_value = "Dhoni matches"
+        self._route("How many matches has MS Dhoni played?")
+        mock_fn.assert_called_once_with("MS Dhoni")
+
+    @patch("app.ai.query_router.router.answer_player_comparison_question")
+    def test_compare_players_routes(self, mock_fn):
+        mock_fn.return_value = "Comparison"
+        self._route("Compare Kohli and Rohit Sharma.")
+        mock_fn.assert_called_once_with("Kohli", "Rohit Sharma")
+
+    @patch("app.ai.query_router.router.answer_player_season_breakdown_question")
+    def test_player_season_wise_routes(self, mock_fn):
+        mock_fn.return_value = "Season breakdown"
+        self._route("Show Virat Kohli's season-wise performance.")
+        mock_fn.assert_called_once_with("Virat Kohli")
+
+    @patch("app.ai.query_router.router.answer_team_question")
+    def test_team_wins_in_season_routes_with_season(self, mock_fn):
+        mock_fn.return_value = "CSK 2024"
+        self._route("How many matches did CSK win in 2024?")
+        mock_fn.assert_called_once_with("csk", season="2024")
+
+    @patch("app.ai.query_router.router.answer_team_runs_leaderboard_question")
+    def test_which_team_scored_most_runs_routes(self, mock_fn):
+        mock_fn.return_value = "Team runs"
+        self._route("Which team scored the most runs?")
+        mock_fn.assert_called_once_with(season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_most_titles_question")
+    def test_which_team_most_titles_routes(self, mock_fn):
+        mock_fn.return_value = "Team titles"
+        self._route("Which team has won the most IPL titles?")
+        mock_fn.assert_called_once_with()
+
+    @patch("app.ai.query_router.router.answer_head_to_head_question")
+    def test_beaten_phrasing_routes_to_h2h(self, mock_fn):
+        mock_fn.return_value = "H2H"
+        self._route("How many times has CSK beaten MI?")
+        mock_fn.assert_called_once_with("csk", "mi")
+
+    @patch("app.ai.query_router.router.answer_match_by_date_question")
+    def test_match_by_date_routes(self, mock_fn):
+        import datetime
+        mock_fn.return_value = "Date match"
+        self._route("What was the result of the CSK vs MI match on 2024-04-14?")
+        mock_fn.assert_called_once()
+        self.assertEqual(mock_fn.call_args.kwargs["match_date"], datetime.date(2024, 4, 14))
+        self.assertEqual(mock_fn.call_args.kwargs["team_one"], "csk")
+        self.assertEqual(mock_fn.call_args.kwargs["team_two"], "mi")
+
+    @patch("app.ai.query_router.router.answer_match_awards_question")
+    def test_potm_with_match_id_routes(self, mock_fn):
+        mock_fn.return_value = "POTM"
+        self._route("Who was player of the match in match 335982?")
+        mock_fn.assert_called_once_with(match_id=335982)
+
+    @patch("app.ai.query_router.router.answer_last_over_question")
+    def test_last_over_with_match_id_routes(self, mock_fn):
+        mock_fn.return_value = "Last over"
+        self._route("What happened in the last over of match 335982?")
+        mock_fn.assert_called_once_with(335982)
+
+    def test_ambiguous_scorecard_without_match_prompts_specifically(self):
+        result = self._route("Show the scorecard.")
+        self.assertIn("match ID", result)
+
+    @patch("app.ai.query_router.router.answer_highest_chases_question")
+    def test_highest_run_chase_routes(self, mock_fn):
+        mock_fn.return_value = "Chases"
+        self._route("Highest successful run chase.")
+        mock_fn.assert_called_once_with(season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_biggest_victories_question")
+    def test_biggest_victory_by_wickets_routes(self, mock_fn):
+        mock_fn.return_value = "Big win"
+        self._route("Biggest victory by wickets.")
+        mock_fn.assert_called_once_with(by="wickets", season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_team_totals_question")
+    def test_lowest_team_totals_routes(self, mock_fn):
+        mock_fn.return_value = "Lowest totals"
+        self._route("Lowest team totals.")
+        mock_fn.assert_called_once_with(highest=False, season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_most_sixes_innings_question")
+    def test_most_sixes_in_innings_routes(self, mock_fn):
+        mock_fn.return_value = "Sixes innings"
+        self._route("Most sixes in an innings.")
+        mock_fn.assert_called_once_with(season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_phase_stats_question")
+    def test_death_over_bowling_stats_routes(self, mock_fn):
+        mock_fn.return_value = "Death bowling"
+        self._route("Death-over bowling statistics.")
+        mock_fn.assert_called_once_with(phase="death", stat_type="bowling", season=None, limit=10)
+
+    @patch("app.ai.query_router.router.answer_extras_dismissals_question")
+    def test_extras_and_dismissals_routes(self, mock_fn):
+        mock_fn.return_value = "Extras"
+        self._route("Extras and dismissal statistics.")
+        mock_fn.assert_called_once_with(season=None)
+
+    # ------------------------------------------------------------------
+    # Knowledge-cutoff routing, multi-season, comparisons & relative dates
+    # ------------------------------------------------------------------
+
+    @patch("app.ai.query_router.router.answer_historical_llm_question")
+    def test_within_cutoff_campaign_uses_gemini_directly_without_rag(self, mock_hist):
+        mock_hist.return_value = "RR 2008 campaign narrative"
+        result = self._route("Explain Rajasthan Royals' 2008 campaign.")
+        mock_hist.assert_called_once_with(
+            "Explain Rajasthan Royals' 2008 campaign.",
+            seasons=["2007/08"],
+            team_identifier="rajasthan royals",
+        )
+        self.assertEqual(result, "RR 2008 campaign narrative")
+
+    @patch("app.ai.query_router.router.answer_season_winner_question")
+    def test_within_cutoff_exact_winner_still_uses_sql(self, mock_winner):
+        mock_winner.return_value = "Deccan Chargers won 2009"
+        result = self._route("Who won IPL 2009?")
+        mock_winner.assert_called_once_with("2009")
+        self.assertEqual(result, "Deccan Chargers won 2009")
+
+    @patch("app.ai.query_router.router.answer_leaderboard_question")
+    def test_post_cutoff_most_runs_routes_to_sql(self, mock_lb):
+        mock_lb.return_value = "2026 runs leaderboard"
+        result = self._route("Who scored the most runs in IPL 2026?")
+        mock_lb.assert_called_once_with(
+            category="runs",
+            question_type="batting",
+            season="2026",
+            limit=10,
+        )
+        self.assertEqual(result, "2026 runs leaderboard")
+
+    @patch("app.ai.query_router.router.answer_rag_narrative_question")
+    def test_post_cutoff_final_narrative_routes_to_rag(self, mock_rag):
+        mock_rag.return_value = "RAG 2026 final"
+        result = self._route("Explain the IPL 2026 final.")
+        mock_rag.assert_called_once_with("Explain the IPL 2026 final.", season="2026")
+        self.assertEqual(result, "RAG 2026 final")
+
+    @patch("app.ai.query_router.router.answer_cross_boundary_question")
+    def test_cross_cutoff_season_comparison_extracts_both_seasons(self, mock_cross):
+        mock_cross.return_value = "Cross-boundary 2016 vs 2026"
+        result = self._route("Compare IPL 2016 and IPL 2026.")
+        mock_cross.assert_called_once()
+        kwargs = mock_cross.call_args.kwargs
+        self.assertEqual(kwargs["seasons"], ["2016", "2026"])
+        self.assertEqual(kwargs["cutoff_info"]["scope"], "cross_cutoff")
+        self.assertEqual(result, "Cross-boundary 2016 vs 2026")
+
+    @patch("app.ai.query_router.router.answer_player_multi_season_comparison_question")
+    def test_cross_cutoff_single_player_multi_season_comparison(self, mock_ms):
+        mock_ms.return_value = "Kohli 2023 vs 2026"
+        result = self._route("Compare Kohli's performance in 2023 and 2026.")
+        mock_ms.assert_called_once()
+        args = mock_ms.call_args.args
+        kwargs = mock_ms.call_args.kwargs
+        self.assertEqual(args[1], "Kohli")
+        self.assertEqual(args[2], ["2023", "2026"])
+        self.assertEqual(kwargs["cutoff_info"]["scope"], "cross_cutoff")
+        self.assertEqual(result, "Kohli 2023 vs 2026")
+
+    @patch("app.ai.query_router.router.answer_player_comparison_question")
+    def test_two_player_season_comparison_without_explanation_uses_sql_not_rag(self, mock_sql_cmp):
+        mock_sql_cmp.return_value = "SQL Kohli vs Rohit 2024"
+        result = self._route("Compare Kohli and Rohit in 2024")
+        mock_sql_cmp.assert_called_once_with("Kohli", "Rohit", season="2024")
+        self.assertEqual(result, "SQL Kohli vs Rohit 2024")
+
+    @patch("app.ai.query_router.router.answer_rag_narrative_question")
+    def test_team_history_not_intercepted_by_team_stats(self, mock_rag):
+        mock_rag.return_value = "MI history"
+        result = self._route("IPL history of MI")
+        mock_rag.assert_called_once_with("IPL history of MI", season=None)
+        self.assertEqual(result, "MI history")
+
+    @patch("app.ai.query_router.router.answer_post_cutoff_overview_question")
+    @patch("app.ai.query_router.router.get_latest_season", return_value="2026")
+    def test_relative_latest_season_overview_resolves_latest_season(self, mock_latest, mock_post):
+        mock_post.return_value = "Latest 2026 overview"
+        result = self._route("What happened in the latest IPL season?")
+        mock_latest.assert_called_once_with()
+        mock_post.assert_called_once_with(
+            "What happened in the latest IPL season?",
+            season="2026",
+        )
+        self.assertEqual(result, "Latest 2026 overview")
+
+    @patch("app.ai.query_router.router.answer_leaderboard_question")
+    @patch("app.ai.query_router.router.get_latest_season", return_value="2026")
+    def test_relative_current_season_most_runs_resolves_to_sql(self, mock_latest, mock_lb):
+        mock_lb.return_value = "Current runs leaderboard"
+        result = self._route("Who scored the most runs in the current season?")
+        mock_latest.assert_called_once_with()
+        mock_lb.assert_called_once_with(
+            category="runs",
+            question_type="batting",
+            season="2026",
+            limit=10,
+        )
+        self.assertEqual(result, "Current runs leaderboard")
+
+    @patch("app.ai.query_router.router.answer_rag_narrative_question")
+    def test_ambiguous_unbounded_query_uses_supabase_rather_than_guessing(self, mock_rag):
+        mock_rag.return_value = "RAG grounded fallback"
+        result = self._route("Tell me about recent IPL impact sub impact")
+        mock_rag.assert_called_once()
+        self.assertEqual(result, "RAG grounded fallback")
+
+    @patch.dict("os.environ", {"GEMINI_KNOWLEDGE_CUTOFF_SEASON": "2015", "GEMINI_KNOWLEDGE_CUTOFF_DATE": "2016-01-01"})
+    @patch("app.ai.query_router.router.answer_rag_narrative_question")
+    def test_custom_env_cutoff_shifts_routing_boundary(self, mock_rag):
+        mock_rag.return_value = "2018 routed to RAG under 2015 cutoff"
+        result = self._route("Explain CSK's 2018 campaign.")
+        mock_rag.assert_called_once_with("Explain CSK's 2018 campaign.", season="2018")
+        self.assertEqual(result, "2018 routed to RAG under 2015 cutoff")
+
+    def test_extract_query_entities_handles_multi_season_and_since_ranges(self):
+        from app.ai.query_router.router import extract_query_entities
+        entities = extract_query_entities("Compare CSK since 2018 and 2026")
+        self.assertEqual(entities["seasons"], ["2018", "2026"])
+        self.assertTrue(entities["has_since_range"])
+        self.assertEqual(entities["cutoff"]["scope"], "cross_cutoff")
+
+        since_only = extract_query_entities("How has MI performed since 2020?")
+        self.assertEqual(since_only["seasons"], ["2020/21"])
+        self.assertEqual(since_only["cutoff"]["scope"], "cross_cutoff")
+
 
 if __name__ == "__main__":
     unittest.main()

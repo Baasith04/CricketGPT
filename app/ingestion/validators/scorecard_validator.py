@@ -1,4 +1,7 @@
 
+from app.database.connection import get_db_connection
+
+
 def validate_innings(stored, calculated):
     fields = (
         "total_runs",
@@ -56,4 +59,63 @@ def validate_all_innings(rows):
         "valid_innings": sum(r["is_valid"] for r in results),
         "invalid_innings": sum(not r["is_valid"] for r in results),
         "results": results,
+    }
+
+
+def validate_imported_match(match_id: int):
+    """
+    Validate stored innings totals for one imported match against raw deliveries
+    and delivery_wickets rows in Supabase (reusing `validate_all_innings`).
+    """
+    query = """
+        WITH delivery_agg AS (
+            SELECT
+                innings_id,
+                COALESCE(SUM(total_runs), 0)::INT AS total_runs_calculated,
+                COUNT(*) FILTER (WHERE is_legal_ball)::INT AS legal_balls_calculated,
+                COUNT(*)::INT AS delivery_count
+            FROM deliveries
+            WHERE match_id = %s
+            GROUP BY innings_id
+        ),
+        wicket_agg AS (
+            SELECT
+                d.innings_id,
+                COUNT(*) FILTER (
+                    WHERE LOWER(COALESCE(dw.dismissal_kind, '')) <> 'retired hurt'
+                )::INT AS total_wickets_calculated
+            FROM delivery_wickets dw
+            JOIN deliveries d
+              ON d.delivery_id = dw.delivery_id AND d.match_id = dw.match_id
+            WHERE dw.match_id = %s
+            GROUP BY d.innings_id
+        )
+        SELECT
+            i.match_id,
+            i.innings_number,
+            i.is_super_over,
+            i.total_runs,
+            i.total_wickets,
+            i.legal_balls_bowled,
+            COALESCE(da.total_runs_calculated, 0) AS total_runs_calculated,
+            COALESCE(wa.total_wickets_calculated, 0) AS total_wickets_calculated,
+            COALESCE(da.legal_balls_calculated, 0) AS legal_balls_calculated,
+            COALESCE(da.delivery_count, 0) AS delivery_count
+        FROM innings i
+        LEFT JOIN delivery_agg da ON da.innings_id = i.innings_id
+        LEFT JOIN wicket_agg wa ON wa.innings_id = i.innings_id
+        WHERE i.match_id = %s
+        ORDER BY i.innings_number ASC;
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (match_id, match_id, match_id))
+            cols = [c.name for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    summary = validate_all_innings(rows)
+    return {
+        "match_id": match_id,
+        "is_valid": summary["invalid_innings"] == 0,
+        **summary,
     }

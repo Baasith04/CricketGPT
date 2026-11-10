@@ -105,10 +105,38 @@ def parse_match(file_path: str | Path) -> dict:
 
     # Extract match metadata.
     outcome = info.get("outcome", {})
+    event = info.get("event") if isinstance(info.get("event"), dict) else {}
+    stage_raw = event.get("stage")
+    stage = (
+        str(stage_raw).strip()
+        if isinstance(stage_raw, str) and stage_raw.strip()
+        else None
+    )
+    raw_match_num = event.get("match_number")
+    match_number = (
+        raw_match_num
+        if isinstance(raw_match_num, int) and not isinstance(raw_match_num, bool) and raw_match_num > 0
+        else None
+    )
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    raw_rev = meta.get("revision", 1)
+    cricsheet_revision = (
+        raw_rev
+        if isinstance(raw_rev, int) and not isinstance(raw_rev, bool) and raw_rev >= 1
+        else 1
+    )
+    raw_created = meta.get("created")
+    cricsheet_created_date = (
+        raw_created.strip()
+        if isinstance(raw_created, str) and raw_created.strip()
+        else None
+    )
 
     return {
         "match_id": int(file_path.stem),
         "season": str(info["season"]),
+        "match_number": match_number,
+        "stage": stage,
         "dates": info["dates"],
         "venue": info.get("venue"),
         "city": info.get("city"),
@@ -117,6 +145,8 @@ def parse_match(file_path: str | Path) -> dict:
         "winner": outcome.get("winner"),
         "result_by": outcome.get("by", {}),
         "result_method": outcome.get("method"),
+        "cricsheet_revision": cricsheet_revision,
+        "cricsheet_created_date": cricsheet_created_date,
         "player_of_match": info.get("player_of_match", []),
         "players": players,
         "innings": innings_list,

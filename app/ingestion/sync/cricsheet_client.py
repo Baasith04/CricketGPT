@@ -1,56 +1,92 @@
 
 import hashlib
 import json
+import logging
 import shutil
-import tempfile
+import time
 import zipfile
 
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+logger = logging.getLogger(__name__)
 
 CRICSHEET_IPL_JSON_URL = (
     "https://cricsheet.org/downloads/ipl_json.zip"
 )
 
+_TRANSIENT_HTTP_CODES = {408, 429, 500, 502, 503, 504}
 
-def download_ipl_archive(destination):
-    """
-    Download the official IPL JSON archive.
 
-    The download is written to a temporary file first.
-    The destination is replaced only after ZIP validation.
+def _is_retryable_download_error(exc: Exception) -> bool:
+    """Retry only transient network/server errors or corrupted partial ZIP downloads."""
+    if isinstance(exc, HTTPError):
+        return exc.code in _TRANSIENT_HTTP_CODES
+    if isinstance(exc, (URLError, TimeoutError, ConnectionError, OSError)):
+        return True
+    if isinstance(exc, ValueError) and "not a valid ZIP archive" in str(exc):
+        return True
+    return False
+
+
+def download_ipl_archive(
+    destination,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+):
     """
+    Download the official IPL JSON archive with bounded exponential backoff retries
+    for transient network/server failures (without retrying permanent 4xx errors).
+
+    The download is written to a temporary file first and atomically replaces
+    the destination only after ZIP validation.
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1.")
+
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-
-    request = Request(
-        CRICSHEET_IPL_JSON_URL,
-        headers={"User-Agent": "CricketGPT/1.0"},
-    )
-
     temporary_path = destination.with_suffix(
         destination.suffix + ".part"
     )
 
-    try:
-        with urlopen(request, timeout=120) as response:
-            with open(temporary_path, "wb") as output:
-                shutil.copyfileobj(response, output)
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        request = Request(
+            CRICSHEET_IPL_JSON_URL,
+            headers={"User-Agent": "CricketGPT/1.0"},
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                with open(temporary_path, "wb") as output:
+                    shutil.copyfileobj(response, output)
 
-        if not zipfile.is_zipfile(temporary_path):
-            raise ValueError(
-                "Downloaded Cricsheet file is not a valid ZIP archive."
+            if not zipfile.is_zipfile(temporary_path):
+                raise ValueError(
+                    "Downloaded Cricsheet file is not a valid ZIP archive."
+                )
+
+            temporary_path.replace(destination)
+            return destination
+
+        except Exception as exc:
+            if temporary_path.exists():
+                temporary_path.unlink()
+            last_exc = exc
+            if attempt >= max_attempts or not _is_retryable_download_error(exc):
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "Cricsheet download failed (attempt %d/%d: %s). Retrying in %.2fs...",
+                attempt,
+                max_attempts,
+                exc,
+                delay,
             )
+            time.sleep(delay)
 
-        temporary_path.replace(destination)
-
-        return destination
-
-    except Exception:
-        if temporary_path.exists():
-            temporary_path.unlink()
-        raise
+    raise last_exc  # type: ignore[misc]
 
 
 def calculate_sha256(content):

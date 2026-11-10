@@ -151,7 +151,7 @@ def get_match_scorecard(match_id: int) -> Optional[Dict[str, Any]]:
         WITH bowling_stats AS (
             SELECT
                 d.bowler_id AS player_id,
-                COALESCE(p.canonical_name, d.bowler_name) AS player_name,
+                COALESCE(p.canonical_name, MAX(d.bowler_name)) AS player_name,
                 COUNT(*) FILTER (WHERE d.is_legal_ball = TRUE) AS legal_balls,
                 SUM(d.batter_runs + COALESCE(d.wide_runs, 0) + COALESCE(d.no_ball_runs, 0)) AS runs_conceded,
                 COUNT(*) FILTER (WHERE d.wide_runs > 0) AS wides,
@@ -160,7 +160,7 @@ def get_match_scorecard(match_id: int) -> Optional[Dict[str, Any]]:
             FROM deliveries d
             LEFT JOIN players p ON p.player_id = d.bowler_id
             WHERE d.innings_id = %s
-            GROUP BY d.bowler_id, p.canonical_name, d.bowler_name
+            GROUP BY d.bowler_id, p.canonical_name
         ),
         over_stats AS (
             SELECT

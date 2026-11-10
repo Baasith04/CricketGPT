@@ -454,6 +454,112 @@ class TestLLMClientPlaceholderDetection(unittest.TestCase):
         self.assertIn("gemini, groq", str(ctx.exception))
 
 
+class TestCutoffAwareAnswerServices(unittest.TestCase):
+    """Tests for within-cutoff Gemini, post-cutoff overview, and cross-cutoff synthesis."""
+
+    @patch("app.ai.answer_service.hybrid_retrieve")
+    @patch("app.ai.answer_service.generate_response")
+    def test_historical_llm_question_calls_gemini_directly_without_rag(self, mock_gen, mock_ret):
+        mock_gen.return_value = "Rajasthan Royals won IPL 2008 under Shane Warne."
+        from app.ai.answer_service import answer_historical_llm_question
+        result = answer_historical_llm_question(
+            "Explain Rajasthan Royals' 2008 campaign.",
+            seasons=["2007/08"],
+            team_identifier="rajasthan royals",
+        )
+        mock_gen.assert_called_once()
+        mock_ret.assert_not_called()
+        self.assertIn("Shane Warne", result)
+        self.assertIn("Gemini Historical Knowledge", result)
+
+    @patch("app.ai.answer_service.answer_rag_question")
+    @patch("app.ai.answer_service.get_team_runs_leaderboard", return_value=[])
+    @patch("app.ai.answer_service.get_bowling_leaderboard", return_value=[])
+    @patch("app.ai.answer_service.get_batting_leaderboard")
+    @patch("app.ai.answer_service.get_season_winner")
+    @patch("app.ai.answer_service.get_latest_season", return_value="2026")
+    def test_post_cutoff_overview_uses_sql_plus_rag_for_latest_season(
+        self, mock_latest, mock_win, mock_bat, mock_bowl, mock_team_lb, mock_rag
+    ):
+        mock_win.return_value = {"winner": "Royal Challengers Bengaluru", "match_id": 1500001, "match_date": "2026-05-31"}
+        mock_bat.return_value = [{"player_name": "V Kohli", "total_runs": 650, "matches_played": 14}]
+        mock_rag.return_value = "IPL 2026 summary [SQL] [S1]"
+        from app.ai.answer_service import answer_post_cutoff_overview_question
+        result = answer_post_cutoff_overview_question("What happened in the latest IPL season?")
+        mock_latest.assert_called_once()
+        mock_rag.assert_called_once()
+        self.assertEqual(mock_rag.call_args.kwargs["season"], "2026")
+        self.assertIn("Royal Challengers Bengaluru", mock_rag.call_args.kwargs["sql_context"])
+        self.assertEqual(result, "IPL 2026 summary [SQL] [S1]")
+
+    @patch("app.ai.answer_service.get_latest_season", return_value=None)
+    def test_post_cutoff_overview_missing_latest_season_reports_unavailability(self, mock_latest):
+        from app.ai.answer_service import answer_post_cutoff_overview_question
+        result = answer_post_cutoff_overview_question("What happened in the latest IPL season?")
+        self.assertIn("no recent ipl season records", result.lower())
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.hybrid_retrieve")
+    @patch("app.ai.answer_service.get_player_bowling_stats", return_value=[])
+    @patch("app.ai.answer_service.get_player_batting_stats")
+    def test_player_multi_season_cross_cutoff_combines_sql_and_rag(
+        self, mock_bat, mock_bowl, mock_ret, mock_gen
+    ):
+        mock_bat.side_effect = [
+            [_batting_row(total_runs=639, matches_played=14)],
+            [_batting_row(total_runs=610, matches_played=15)],
+        ]
+        mock_ret.return_value = [{
+            "chunk_id": 10,
+            "title": "IPL 2026 Match Report",
+            "season": "2026",
+            "source_key": "db:match:1500001",
+            "source_path": "supabase://matches/1500001",
+            "chunk_text": "Kohli anchored chases in 2026.",
+            "hybrid_score": 0.72,
+        }]
+        mock_gen.return_value = "In 2023 Kohli scored 639 runs [SQL] and in 2026 scored 610 runs [SQL][S1]."
+
+        from app.ai.answer_service import answer_player_multi_season_comparison_question
+        result = answer_player_multi_season_comparison_question(
+            "Compare Kohli's performance in 2023 and 2026.",
+            "Kohli",
+            ["2023", "2026"],
+            cutoff_info={"scope": "cross_cutoff", "post_seasons": ["2026"], "within_seasons": ["2023"]},
+        )
+        self.assertEqual(mock_bat.call_count, 2)
+        self.assertIn("639", mock_gen.call_args.args[0])
+        self.assertIn("610", mock_gen.call_args.args[0])
+        self.assertIn("### Sources", result)
+        self.assertIn("[SQL]", result)
+        self.assertIn("Gemini Historical Knowledge", result)
+        self.assertIn("[S1]", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.hybrid_retrieve", return_value=[])
+    @patch("app.ai.answer_service.get_bowling_leaderboard", return_value=[])
+    @patch("app.ai.answer_service.get_batting_leaderboard", return_value=[])
+    @patch("app.ai.answer_service.get_season_winner")
+    def test_cross_boundary_season_comparison_distinguishes_sources(
+        self, mock_win, mock_bat, mock_bowl, mock_ret, mock_gen
+    ):
+        mock_win.side_effect = [
+            {"winner": "Sunrisers Hyderabad", "match_id": 981019, "match_date": "2016-05-29"},
+            {"winner": "Royal Challengers Bengaluru", "match_id": 1500001, "match_date": "2026-05-31"},
+        ]
+        mock_gen.return_value = "SRH won 2016 [Gemini Historical Knowledge][SQL], whereas RCB won 2026 [SQL]."
+
+        from app.ai.answer_service import answer_cross_boundary_question
+        result = answer_cross_boundary_question(
+            "Compare IPL 2016 and IPL 2026.",
+            seasons=["2016", "2026"],
+            cutoff_info={"scope": "cross_cutoff", "within_seasons": ["2016"], "post_seasons": ["2026"]},
+        )
+        self.assertIn("Gemini Historical Knowledge", result)
+        self.assertIn("[SQL]", result)
+        self.assertIn("2016", result)
+
+
 if __name__ == "__main__":
     unittest.main()
 

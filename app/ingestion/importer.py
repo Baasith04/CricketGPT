@@ -216,6 +216,8 @@ def import_match(
                 INSERT INTO matches (
                     match_id,
                     season,
+                    match_number,
+                    stage,
                     match_date,
                     venue,
                     city,
@@ -226,16 +228,20 @@ def import_match(
                     result_method,
                     win_by_runs,
                     win_by_wickets,
+                    cricsheet_revision,
+                    cricsheet_created_date,
                     raw_json
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
                     match_id,
                     match["season"],
+                    match.get("match_number"),
+                    match.get("stage"),
                     match["dates"][0],
                     match["venue"] or "Unknown",
                     match["city"],
@@ -246,6 +252,8 @@ def import_match(
                     outcome.get("method"),
                     result_by.get("runs"),
                     result_by.get("wickets"),
+                    revision,
+                    match.get("cricsheet_created_date"),
                     Jsonb(raw_data),
                 ),
             )
@@ -270,8 +278,23 @@ def import_match(
                     ),
                 )
 
-            # 3. MATCH PLAYERS
+            # 3. PLAYERS & MATCH PLAYERS
             for player in match["players"]:
+                cur.execute(
+                    """
+                    INSERT INTO players (
+                        player_id,
+                        canonical_name,
+                        is_unresolved
+                    )
+                    VALUES (%s, %s, FALSE)
+                    ON CONFLICT (player_id) DO NOTHING
+                    """,
+                    (
+                        player["player_id"],
+                        player["match_display_name"],
+                    ),
+                )
                 cur.execute(
                     """
                     INSERT INTO match_players (
