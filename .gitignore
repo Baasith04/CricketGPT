@@ -53,3 +53,9 @@ evaluation/reports/
 
 # Local datasets (only if not intended for GitHub)
 dataset/
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
