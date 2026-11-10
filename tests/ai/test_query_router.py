@@ -1,5 +1,6 @@
 """Tests for the AI query router."""
 
+import datetime
 import unittest
 from unittest.mock import patch
 
@@ -709,6 +710,76 @@ class TestRouteQuestion(unittest.TestCase):
         mock_hist.assert_called_once()
         mock_playoff.assert_not_called()
         self.assertEqual(result, "Historical Qualifier 2 narrative")
+
+    @patch("app.ai.query_router.router.answer_match_by_date_question")
+    @patch("app.ai.query_router.router.answer_match_awards_question")
+    def test_potm_with_match_date_routes_to_date_resolver(self, mock_awards, mock_date):
+        mock_date.return_value = "Date POTM"
+        result = self._route("Who was the POTM in CSK vs MI on 2024-04-14?")
+        mock_awards.assert_not_called()
+        mock_date.assert_called_once()
+        self.assertTrue(mock_date.call_args.kwargs["wants_potm"])
+        self.assertEqual(mock_date.call_args.kwargs["match_date"], datetime.date(2024, 4, 14))
+        self.assertEqual(result, "Date POTM")
+
+    @patch("app.ai.query_router.router.answer_versus_potm_question")
+    def test_potm_versus_season_routes_to_versus_potm(self, mock_vs_potm):
+        mock_vs_potm.return_value = "Versus POTM"
+        result = self._route("Who was the POTM in SRH vs KKR in IPL 2024?")
+        mock_vs_potm.assert_called_once_with("srh", "kkr", season="2024")
+        self.assertEqual(result, "Versus POTM")
+
+    @patch("app.ai.query_router.router.get_first_match_id", return_value=335982)
+    @patch("app.ai.query_router.router.answer_match_awards_question")
+    def test_first_match_potm_routes_to_awards(self, mock_awards, mock_first):
+        mock_awards.return_value = "First match POTM"
+        result = self._route("Who was the player of the match in the first match of IPL?")
+        mock_awards.assert_called_once_with(match_id=335982)
+        self.assertEqual(result, "First match POTM")
+
+    @patch("app.ai.query_router.router.answer_leaderboard_question")
+    def test_dot_balls_natural_language_variations_route_to_sql(self, mock_lb):
+        mock_lb.return_value = "Dot balls leaderboard"
+
+        self._route("Who has bowled the most dot balls in IPL history?")
+        mock_lb.assert_called_with(
+            category="dot_balls",
+            question_type="bowling",
+            season=None,
+            limit=10,
+        )
+
+        self._route("Top 5 bowlers with the most dot balls.")
+        mock_lb.assert_called_with(
+            category="dot_balls",
+            question_type="bowling",
+            season=None,
+            limit=5,
+        )
+
+        self._route("Top 10 bowlers with the most dot balls.")
+        mock_lb.assert_called_with(
+            category="dot_balls",
+            question_type="bowling",
+            season=None,
+            limit=10,
+        )
+
+        self._route("Most dot balls bowled in IPL 2024.")
+        mock_lb.assert_called_with(
+            category="dot_balls",
+            question_type="bowling",
+            season="2024",
+            limit=10,
+        )
+
+        self._route("Which bowler bowled the most dot balls in a single match?")
+        mock_lb.assert_called_with(
+            category="dot_balls",
+            question_type="single_match_dot_balls",
+            season=None,
+            limit=10,
+        )
 
 
 if __name__ == "__main__":

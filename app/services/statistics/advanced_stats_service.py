@@ -282,6 +282,35 @@ def find_matches_by_filter(
     return results
 
 
+_SINGLE_MATCH_AWARD_SELECT = """
+    SELECT
+        m.match_id,
+        m.season,
+        m.match_date,
+        COALESCE(
+            NULLIF(TRIM(m.stage), ''),
+            NULLIF(TRIM(m.raw_json->'info'->'event'->>'stage'), '')
+        ) AS stage,
+        ma.award_name,
+        ma.player_id,
+        COALESCE(p.canonical_name, ma.recipient_name) AS player_name,
+        pt.canonical_name AS player_team,
+        (
+            SELECT STRING_AGG(t.canonical_name, ' vs ' ORDER BY mt.team_number)
+            FROM match_teams mt
+            JOIN teams t ON t.team_id = mt.team_id
+            WHERE mt.match_id = m.match_id
+        ) AS teams
+    FROM match_awards ma
+    JOIN matches m ON m.match_id = ma.match_id
+    LEFT JOIN players p ON p.player_id = ma.player_id
+    LEFT JOIN match_players mp
+      ON mp.match_id = m.match_id
+     AND mp.player_id = ma.player_id
+    LEFT JOIN teams pt ON pt.team_id = mp.team_id
+"""
+
+
 def get_match_awards(
     match_id: Optional[int] = None,
     season: Optional[str] = None,
@@ -291,23 +320,8 @@ def get_match_awards(
     """Return Player of the Match award(s) for a match, season final, or leaderboard."""
     if match_id is not None:
         return _fetch_all(
-            """
-            SELECT
-                m.match_id,
-                m.season,
-                m.match_date,
-                ma.award_name,
-                ma.player_id,
-                COALESCE(p.canonical_name, ma.recipient_name) AS player_name,
-                (
-                    SELECT STRING_AGG(t.canonical_name, ' vs ' ORDER BY mt.team_number)
-                    FROM match_teams mt
-                    JOIN teams t ON t.team_id = mt.team_id
-                    WHERE mt.match_id = m.match_id
-                ) AS teams
-            FROM match_awards ma
-            JOIN matches m ON m.match_id = ma.match_id
-            LEFT JOIN players p ON p.player_id = ma.player_id
+            f"""
+            {_SINGLE_MATCH_AWARD_SELECT}
             WHERE ma.match_id = %s;
             """,
             (match_id,),
@@ -315,31 +329,25 @@ def get_match_awards(
 
     if final_only and season:
         return _fetch_all(
-            """
+            f"""
             WITH target_match AS (
                 SELECT match_id
                 FROM matches
                 WHERE season = %s
-                ORDER BY match_date DESC, match_id DESC
+                ORDER BY
+                    CASE
+                        WHEN COALESCE(
+                            NULLIF(TRIM(stage), ''),
+                            NULLIF(TRIM(raw_json->'info'->'event'->>'stage'), '')
+                        ) = 'Final' THEN 0
+                        ELSE 1
+                    END ASC,
+                    match_date DESC,
+                    match_id DESC
                 LIMIT 1
             )
-            SELECT
-                m.match_id,
-                m.season,
-                m.match_date,
-                ma.award_name,
-                ma.player_id,
-                COALESCE(p.canonical_name, ma.recipient_name) AS player_name,
-                (
-                    SELECT STRING_AGG(t.canonical_name, ' vs ' ORDER BY mt.team_number)
-                    FROM match_teams mt
-                    JOIN teams t ON t.team_id = mt.team_id
-                    WHERE mt.match_id = m.match_id
-                ) AS teams
-            FROM target_match tm
-            JOIN match_awards ma ON ma.match_id = tm.match_id
-            JOIN matches m ON m.match_id = ma.match_id
-            LEFT JOIN players p ON p.player_id = ma.player_id;
+            {_SINGLE_MATCH_AWARD_SELECT}
+            JOIN target_match tm ON tm.match_id = m.match_id;
             """,
             (season.strip(),),
         )

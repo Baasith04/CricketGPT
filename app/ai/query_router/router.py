@@ -35,6 +35,7 @@ from app.ai.answer_service import (
     answer_team_runs_leaderboard_question,
     answer_team_totals_question,
     answer_team_versus_matches_question,
+    answer_versus_potm_question,
     answer_wickets_question,
 )
 from app.ai.cutoff import (
@@ -106,6 +107,10 @@ _LEADERBOARD_GUARD_TERMS = [
     "leaderboard",
     "most runs",
     "most wickets",
+    "most dot balls",
+    "most dot ball",
+    "dot balls",
+    "dot ball",
     "highest run",
     "highest wicket",
     "highest score",
@@ -243,17 +248,21 @@ def _extract_head_to_head_teams(normalized: str) -> Optional[Tuple[str, str]]:
 
     leading_noise = (
         r"^(?:what\s+(?:is|are|was|were)\s+(?:the\s+)?|"
+        r"who\s+(?:was|is|won)(?:\s+the)?\s+|"
+        r"(?:player|man)\s+of\s+the\s+match(?:\s+(?:for|in|of))?\s+|"
+        r"(?:potm|motm)(?:\s+(?:for|in|of))?\s+|"
         r"show(?:\s+me)?\s+|tell\s+me(?:\s+about)?\s+|give\s+me\s+|get\s+|compare\s+|"
-        r"who\s+won(?:\s+the)?\s+|how\s+many\s+times\s+(?:has|have)\s+|"
+        r"how\s+many\s+times\s+(?:has|have)\s+|"
         r"head[- ]to[- ]head(?:\s+for|\s+of)?\s+|"
         r"(?:match\s+)?results?(?:\s+for|\s+of)?\s+|"
         r"scorecards?(?:\s+for|\s+of)?\s+|"
         r"fall\s+of\s+wickets(?:\s+for|\s+of)?\s+|"
-        r"matches?(?:\s+for|\s+of)?\s+|the\s+)+"
+        r"matches?(?:\s+for|\s+of)?\s+|the\s+|in\s+|for\s+|of\s+)+"
     )
     trailing_noise = (
         r"\s+(?:head[- ]to[- ]head|match\s+results?|matches?|match|"
-        r"results?|scorecards?|winners?|records?|stats|statistics|on|in|for).*$"
+        r"results?|scorecards?|winners?|records?|stats|statistics|"
+        r"(?:player|man)\s+of\s+the\s+match|potm|motm|on|in|for).*$"
     )
 
     # Pattern 1: "<team1> vs/versus <team2>"
@@ -627,6 +636,10 @@ def route_question(question: str) -> str:
         first_id = get_first_match_id()
         if first_id is None:
             return "No IPL match records are currently available."
+        if any(t in normalized for t in ["player of the match", "man of the match"]) or bool(
+            re.search(r"\b(?:potm|motm)\b", normalized)
+        ):
+            return answer_match_awards_question(match_id=first_id)
         return answer_match_question(first_id, question)
 
     # ------------------------------------------------------------------
@@ -727,10 +740,37 @@ def route_question(question: str) -> str:
     ])
     playoff_info = extract_playoff_stage(normalized)
 
+    has_potm_intent = (
+        any(t in normalized for t in ["player of the match", "man of the match"])
+        or bool(re.search(r"\b(?:potm|motm)\b", normalized))
+    )
+    is_versus_trigger = bool(
+        re.search(r"\b(?:vs\.?|versus)\b|head[- ]to[- ]head", normalized)
+        or re.search(r"\b(?:beaten|beat|defeated|won\s+against)\b", normalized)
+        or ("between" in normalized and len(team_matches) >= 1)
+    )
+
     # ------------------------------------------------------------------
-    # 4. Player of the Match (without match ID: season stage/final or all-time)
+    # 4. Match by Date (including POTM on a specific date)
     # ------------------------------------------------------------------
-    if any(t in normalized for t in ["player of the match", "man of the match", "potm", "motm"]):
+    if match_date is not None:
+        extracted_teams = _extract_head_to_head_teams(normalized) if is_versus_trigger else None
+        t1 = extracted_teams[0] if extracted_teams else (team_matches[0] if len(team_matches) >= 1 else None)
+        t2 = extracted_teams[1] if extracted_teams else (team_matches[1] if len(team_matches) >= 2 else None)
+        return answer_match_by_date_question(
+            match_date=match_date,
+            team_one=t1,
+            team_two=t2,
+            wants_scorecard="scorecard" in normalized or "innings" in normalized,
+            wants_wickets="fall of wickets" in normalized or "wickets" in normalized,
+            wants_last_over="last over" in normalized or "final over" in normalized,
+            wants_potm=has_potm_intent,
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Player of the Match (stage / final / team-vs-team / leaderboard)
+    # ------------------------------------------------------------------
+    if has_potm_intent:
         resolved = eff_season()
         if (
             playoff_info["ambiguous_type"] == "qualifier"
@@ -755,33 +795,20 @@ def route_question(question: str) -> str:
                 playoff_info["stage"],
                 detail_type="potm",
             )
+        if playoff_info["stage"] == "final" and resolved is not None and not has_leaderboard_phrase:
+            return answer_match_awards_question(
+                season=resolved,
+                final_only=True,
+                limit=limit,
+            )
+        if is_versus_trigger and not has_leaderboard_phrase:
+            teams = _extract_head_to_head_teams(normalized)
+            if teams:
+                return answer_versus_potm_question(teams[0], teams[1], season=resolved)
         return answer_match_awards_question(
             season=resolved,
-            final_only=(playoff_info["stage"] == "final" and resolved is not None),
+            final_only=False,
             limit=limit,
-        )
-
-    # ------------------------------------------------------------------
-    # 5. Match by Date & Playoff Stage Resolution & Team-vs-Team / Head-to-Head
-    # ------------------------------------------------------------------
-    is_versus_trigger = bool(
-        re.search(r"\b(?:vs\.?|versus)\b|head[- ]to[- ]head", normalized)
-        or re.search(r"\b(?:beaten|beat|defeated|won\s+against)\b", normalized)
-        or ("between" in normalized and len(team_matches) >= 1)
-    )
-
-    if match_date is not None:
-        extracted_teams = _extract_head_to_head_teams(normalized) if is_versus_trigger else None
-        t1 = extracted_teams[0] if extracted_teams else (team_matches[0] if len(team_matches) >= 1 else None)
-        t2 = extracted_teams[1] if extracted_teams else (team_matches[1] if len(team_matches) >= 2 else None)
-        return answer_match_by_date_question(
-            match_date=match_date,
-            team_one=t1,
-            team_two=t2,
-            wants_scorecard="scorecard" in normalized or "innings" in normalized,
-            wants_wickets="fall of wickets" in normalized or "wickets" in normalized,
-            wants_last_over="last over" in normalized or "final over" in normalized,
-            wants_potm="player of the match" in normalized or "man of the match" in normalized,
         )
 
     ambiguous_playoff = playoff_info["ambiguous_type"]
@@ -1079,6 +1106,29 @@ def route_question(question: str) -> str:
         return answer_leaderboard_question(
             category="five_wickets",
             question_type="bowling",
+            season=eff_season(),
+            limit=limit,
+        )
+
+    has_dot_balls_intent = (
+        "dot ball" in normalized
+        or "dot balls" in normalized
+        or bool(re.search(r"\bdots\b", normalized))
+    )
+    if has_dot_balls_intent:
+        is_single_match_dots = any(
+            t in normalized
+            for t in [
+                "in a single match",
+                "single match",
+                "in a match",
+                "in an innings",
+                "in one match",
+            ]
+        )
+        return answer_leaderboard_question(
+            category="dot_balls",
+            question_type="single_match_dot_balls" if is_single_match_dots else "bowling",
             season=eff_season(),
             limit=limit,
         )

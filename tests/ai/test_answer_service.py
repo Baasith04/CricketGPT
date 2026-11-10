@@ -861,6 +861,322 @@ class TestScorecardFormattingAndSeasonFinal(unittest.TestCase):
         self.assertIn("1001", ambig_res)
         mock_gen.assert_not_called()
 
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_match_scorecard")
+    @patch("app.ai.answer_service.get_match_details")
+    @patch("app.ai.answer_service.get_match_awards")
+    def test_potm_ipl_final_formats_player_name_first_with_details_and_stats(
+        self, mock_awards, mock_details, mock_scorecard, mock_gen
+    ):
+        mock_awards.return_value = [
+            {
+                "match_id": 1426312,
+                "season": "2024",
+                "match_date": "2024-05-26",
+                "stage": "Final",
+                "award_name": "Player of the Match",
+                "player_id": "3fb19989",
+                "player_name": "MA Starc",
+                "player_team": "Kolkata Knight Riders",
+                "teams": "Sunrisers Hyderabad vs Kolkata Knight Riders",
+            }
+        ]
+        mock_details.return_value = {
+            "match_id": 1426312,
+            "season": "2024",
+            "match_date": "2024-05-26",
+            "venue": "MA Chidambaram Stadium",
+            "city": "Chennai",
+            "stage": "Final",
+            "teams": [
+                {"team_name": "Sunrisers Hyderabad"},
+                {"team_name": "Kolkata Knight Riders"},
+            ],
+            "result": {"summary": "Kolkata Knight Riders won by 8 wickets"},
+        }
+        mock_scorecard.return_value = {
+            "innings": [
+                {
+                    "batting": [],
+                    "bowling": [
+                        {
+                            "player_id": "3fb19989",
+                            "player_name": "MA Starc",
+                            "overs": "3.0",
+                            "legal_balls": 18,
+                            "runs_conceded": 14,
+                            "wickets": 2,
+                            "economy": 4.67,
+                        }
+                    ],
+                }
+            ],
+            "super_overs": [],
+        }
+
+        from app.ai.answer_service import answer_match_awards_question
+
+        result = answer_match_awards_question(season="2024", final_only=True)
+        mock_gen.assert_not_called()
+
+        lines = result.splitlines()
+        self.assertTrue(lines[0].startswith("🏆 Player of the Match:"))
+        self.assertIn("MA Starc", lines[0])
+        # Player name appears before all match details
+        self.assertLess(result.index("MA Starc"), result.index("**IPL 2024 Final**"))
+        self.assertLess(result.index("MA Starc"), result.index("- Match: Sunrisers Hyderabad vs Kolkata Knight Riders"))
+        self.assertIn("- Date: 26 May 2024", result)
+        self.assertIn("- Result: Kolkata Knight Riders won by 8 wickets", result)
+        self.assertIn("- Match ID: 1426312", result)
+        self.assertIn("- Team: Kolkata Knight Riders", result)
+        self.assertIn("- Performance: Bowling: 2/14 (3.0 overs, econ 4.67)", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_match_scorecard")
+    @patch("app.ai.answer_service.get_match_details")
+    @patch("app.ai.answer_service.get_match_awards")
+    @patch("app.ai.answer_service.resolve_playoff_match")
+    def test_potm_qualifier_2_formats_player_name_first_with_bat_and_bowl_stats(
+        self, mock_resolve, mock_awards, mock_details, mock_scorecard, mock_gen
+    ):
+        mock_resolve.return_value = {
+            "status": "resolved",
+            "season": "2024",
+            "stage": "qualifier_2",
+            "stage_label": "Qualifier 2",
+            "match": {"match_id": 1426311, "stage": "Qualifier 2"},
+            "matches": [{"match_id": 1426311, "stage": "Qualifier 2"}],
+        }
+        mock_awards.return_value = [
+            {
+                "match_id": 1426311,
+                "season": "2024",
+                "match_date": "2024-05-24",
+                "stage": "Qualifier 2",
+                "award_name": "Player of the Match",
+                "player_id": "f9e6e7ef",
+                "player_name": "Shahbaz Ahmed",
+                "player_team": "Sunrisers Hyderabad",
+                "teams": "Sunrisers Hyderabad vs Rajasthan Royals",
+            }
+        ]
+        mock_details.return_value = {
+            "match_id": 1426311,
+            "season": "2024",
+            "match_date": "2024-05-24",
+            "venue": "MA Chidambaram Stadium",
+            "city": "Chennai",
+            "stage": "Qualifier 2",
+            "teams": [
+                {"team_name": "Sunrisers Hyderabad"},
+                {"team_name": "Rajasthan Royals"},
+            ],
+            "result": {"summary": "Sunrisers Hyderabad won by 36 runs"},
+        }
+        mock_scorecard.return_value = {
+            "innings": [
+                {
+                    "batting": [
+                        {
+                            "player_id": "f9e6e7ef",
+                            "player_name": "Shahbaz Ahmed",
+                            "runs": 18,
+                            "balls": 18,
+                            "fours": 0,
+                            "sixes": 1,
+                            "is_out": True,
+                        }
+                    ],
+                    "bowling": [],
+                },
+                {
+                    "batting": [],
+                    "bowling": [
+                        {
+                            "player_id": "f9e6e7ef",
+                            "player_name": "Shahbaz Ahmed",
+                            "overs": "4.0",
+                            "legal_balls": 24,
+                            "runs_conceded": 23,
+                            "wickets": 3,
+                            "economy": 5.75,
+                        }
+                    ],
+                },
+            ],
+            "super_overs": [],
+        }
+
+        from app.ai.answer_service import answer_playoff_match_question
+
+        result = answer_playoff_match_question("2024", "qualifier_2", detail_type="potm")
+        mock_gen.assert_not_called()
+
+        lines = result.splitlines()
+        self.assertTrue(lines[0].startswith("🏆 Player of the Match:"))
+        self.assertIn("Shahbaz Ahmed", lines[0])
+        self.assertLess(result.index("Shahbaz Ahmed"), result.index("**IPL 2024 Qualifier 2**"))
+        self.assertIn("- Match: Sunrisers Hyderabad vs Rajasthan Royals", result)
+        self.assertIn("- Date: 24 May 2024", result)
+        self.assertIn("- Result: Sunrisers Hyderabad won by 36 runs", result)
+        self.assertIn("- Match ID: 1426311", result)
+        self.assertIn("- Team: Sunrisers Hyderabad", result)
+        self.assertIn("Batting: 18 (18 balls, 1x6)", result)
+        self.assertIn("Bowling: 3/23 (4.0 overs, econ 5.75)", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_match_scorecard")
+    @patch("app.ai.answer_service.get_match_details")
+    @patch("app.ai.answer_service.get_match_awards")
+    def test_potm_league_match_formats_player_name_first(
+        self, mock_awards, mock_details, mock_scorecard, mock_gen
+    ):
+        mock_awards.return_value = [
+            {
+                "match_id": 335982,
+                "season": "2007/08",
+                "match_date": "2008-04-18",
+                "stage": None,
+                "award_name": "Player of the Match",
+                "player_id": "b8a55852",
+                "player_name": "BB McCullum",
+                "player_team": "Kolkata Knight Riders",
+                "teams": "Royal Challengers Bengaluru vs Kolkata Knight Riders",
+            }
+        ]
+        mock_details.return_value = {
+            "match_id": 335982,
+            "season": "2007/08",
+            "match_date": "2008-04-18",
+            "venue": "M Chinnaswamy Stadium",
+            "city": "Bengaluru",
+            "stage": None,
+            "teams": [
+                {"team_name": "Royal Challengers Bengaluru"},
+                {"team_name": "Kolkata Knight Riders"},
+            ],
+            "result": {"summary": "Kolkata Knight Riders won by 140 runs"},
+        }
+        mock_scorecard.return_value = {
+            "innings": [
+                {
+                    "batting": [
+                        {
+                            "player_id": "b8a55852",
+                            "player_name": "BB McCullum",
+                            "runs": 158,
+                            "balls": 73,
+                            "fours": 10,
+                            "sixes": 13,
+                            "is_out": False,
+                        }
+                    ],
+                    "bowling": [],
+                }
+            ],
+            "super_overs": [],
+        }
+
+        from app.ai.answer_service import answer_match_awards_question
+
+        result = answer_match_awards_question(match_id=335982)
+        mock_gen.assert_not_called()
+
+        lines = result.splitlines()
+        self.assertTrue(lines[0].startswith("🏆 Player of the Match:"))
+        self.assertIn("BB McCullum", lines[0])
+        self.assertLess(result.index("BB McCullum"), result.index("**IPL 2007/08 Match**"))
+        self.assertIn("- Date: 18 April 2008", result)
+        self.assertIn("- Result: Kolkata Knight Riders won by 140 runs", result)
+        self.assertIn("- Match ID: 335982", result)
+        self.assertIn("- Team: Kolkata Knight Riders", result)
+        self.assertIn("- Performance: Batting: 158* (73 balls, 10x4, 13x6)", result)
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_match_scorecard")
+    @patch("app.ai.answer_service.get_match_details")
+    @patch("app.ai.answer_service.get_match_awards")
+    def test_potm_missing_data_reports_unavailable_without_llm_guess(
+        self, mock_awards, mock_details, mock_scorecard, mock_gen
+    ):
+        from app.ai.answer_service import answer_match_awards_question
+
+        mock_awards.return_value = []
+        mock_details.return_value = {
+            "match_id": 501265,
+            "season": "2011",
+            "match_date": "2011-05-21",
+            "venue": "Feroz Shah Kotla",
+            "city": "Delhi",
+            "stage": None,
+            "teams": [
+                {"team_name": "Delhi Capitals"},
+                {"team_name": "Pune Warriors"},
+            ],
+            "result": {"summary": "No result (match abandoned)"},
+        }
+        mock_scorecard.return_value = None
+
+        match_res = answer_match_awards_question(match_id=501265)
+        self.assertIn("unavailable in the database", match_res.lower())
+        self.assertIn("501265", match_res)
+        self.assertNotIn("🏆 Player of the Match:", match_res)
+
+        final_res = answer_match_awards_question(season="2026", final_only=True)
+        self.assertIn("unavailable in the database", final_res.lower())
+        self.assertIn("IPL 2026 Final", final_res)
+        mock_gen.assert_not_called()
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_bowling_leaderboard")
+    def test_answer_leaderboard_question_formats_dot_balls_and_empty_results(
+        self, mock_bowling, mock_gen
+    ):
+        from app.ai.answer_service import answer_leaderboard_question
+
+        mock_bowling.return_value = [
+            {"player_name": "B Kumar", "dot_balls": 1897, "matches_played": 176},
+            {"player_name": "SP Narine", "dot_balls": 1784, "matches_played": 177},
+        ]
+        result = answer_leaderboard_question(category="dot_balls", question_type="bowling", limit=10)
+        mock_bowling.assert_called_once_with(category="dot_balls", season=None, limit=10)
+        self.assertIn("Rank | Player | Dot Balls | Matches", result)
+        self.assertIn("1 | B Kumar | 1897 | 176", result)
+        self.assertIn("2 | SP Narine | 1784 | 177", result)
+
+        mock_bowling.return_value = []
+        empty_res = answer_leaderboard_question(
+            category="dot_balls", question_type="bowling", season="2099", limit=5
+        )
+        self.assertIn("No leaderboard records found in IPL season 2099.", empty_res)
+        mock_gen.assert_not_called()
+
+    @patch("app.ai.answer_service.generate_response")
+    @patch("app.ai.answer_service.get_most_dot_balls_in_match")
+    def test_answer_leaderboard_question_formats_single_match_dot_balls(
+        self, mock_single, mock_gen
+    ):
+        from app.ai.answer_service import answer_leaderboard_question
+
+        mock_single.return_value = [
+            {
+                "player_name": "Suyash Sharma",
+                "season": "2026",
+                "match_id": 1529282,
+                "dot_balls": 20,
+                "legal_balls": 24,
+            }
+        ]
+        result = answer_leaderboard_question(
+            category="dot_balls",
+            question_type="single_match_dot_balls",
+            limit=5,
+        )
+        mock_single.assert_called_once_with(season=None, limit=5)
+        self.assertIn("Rank | Player | Season | Match ID | Dot Balls | Overs", result)
+        self.assertIn("1 | Suyash Sharma | 2026 | 1529282 | 20 | 4.0", result)
+        mock_gen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

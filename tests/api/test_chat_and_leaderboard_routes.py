@@ -43,14 +43,29 @@ def test_chat_endpoint_too_long_question_rejected(client: TestClient):
 
 
 @patch("app.api.routes.chat.route_question")
-def test_chat_endpoint_internal_error_sanitized(mock_route, client: TestClient):
-    mock_route.side_effect = DatabaseConnectionError("Secret connection string failure")
+def test_chat_endpoint_internal_error_sanitized(mock_route, client: TestClient, caplog):
+    mock_route.side_effect = DatabaseConnectionError(
+        "postgresql://user:supersecret@db.host/postgres failed"
+    )
 
-    response = client.post("/api/chat", json={"question": "Who won IPL 2024?"})
+    with caplog.at_level("ERROR"):
+        response = client.post("/api/chat", json={"question": "Who won IPL 2024?"})
 
     assert response.status_code == 500
     assert response.json()["detail"] == "Unable to process your question."
-    assert "Secret" not in response.text
+    assert "supersecret" not in response.text
+    assert "DatabaseConnectionError" in caplog.text
+    assert "supersecret" not in caplog.text
+
+
+@patch("app.api.routes.chat.route_question")
+def test_chat_endpoint_value_error_returns_400(mock_route, client: TestClient):
+    mock_route.side_effect = ValueError("Limit must be between 1 and 100.")
+
+    response = client.post("/api/chat", json={"question": "Top 0 bowlers with dot balls"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Limit must be between 1 and 100."
 
 
 # ---------------------------------------------------------------------------
@@ -118,4 +133,20 @@ def test_leaderboards_best_bowling_success(mock_svc, client: TestClient):
     assert response.status_code == 200
     assert response.json()[0]["player_name"] == "AS Joseph"
     mock_svc.assert_called_once_with(season=None, limit=3)
+
+
+@patch("app.api.routes.leaderboards.get_bowling_leaderboard")
+def test_leaderboards_bowling_dot_balls_success(mock_svc, client: TestClient):
+    mock_svc.return_value = [{"player_name": "B Kumar", "dot_balls": 1897, "matches_played": 176}]
+
+    response = client.get("/api/leaderboards/bowling?category=dot_balls&limit=5")
+
+    assert response.status_code == 200
+    assert response.json()[0]["dot_balls"] == 1897
+    mock_svc.assert_called_once_with(
+        category="dot_balls",
+        season=None,
+        limit=5,
+        min_balls=0,
+    )
 

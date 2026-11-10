@@ -211,6 +211,7 @@ BOWLING_ORDER = {
     "average": "bowling_average ASC NULLS LAST, wickets DESC",
     "strike_rate": "bowling_strike_rate ASC NULLS LAST, wickets DESC",
     "five_wickets": "five_wickets DESC, wickets DESC, economy ASC NULLS LAST",
+    "dot_balls": "dot_balls DESC, legal_balls ASC, player_name ASC",
 }
 
 
@@ -224,7 +225,7 @@ def get_bowling_leaderboard(
     Return an IPL bowling leaderboard.
 
     Categories:
-    wickets, economy, average, strike_rate, five_wickets.
+    wickets, economy, average, strike_rate, five_wickets, dot_balls.
     """
 
     _validate_limit(limit)
@@ -269,11 +270,18 @@ def get_bowling_leaderboard(
                     WHERE d.is_legal_ball = TRUE
                 ) AS legal_balls,
 
+                -- A dot ball is a legal delivery (no wide or no-ball) with zero total runs
+                -- (excluding byes, leg-byes, penalty extras, and batter runs).
+                COUNT(*) FILTER (
+                    WHERE d.is_legal_ball = TRUE
+                      AND COALESCE(d.total_runs, 0) = 0
+                ) AS dot_balls,
+
                 SUM(
-                    d.total_runs
-                    - d.bye_runs
-                    - d.leg_bye_runs
-                    - d.penalty_runs
+                    COALESCE(d.total_runs, 0)
+                    - COALESCE(d.bye_runs, 0)
+                    - COALESCE(d.leg_bye_runs, 0)
+                    - COALESCE(d.penalty_runs, 0)
                 ) AS runs_conceded
 
             FROM filtered_deliveries d
@@ -311,6 +319,7 @@ def get_bowling_leaderboard(
             b.matches_played,
             b.innings_bowled,
             b.legal_balls,
+            b.dot_balls,
             b.runs_conceded,
             COALESCE(w.wickets, 0) AS wickets,
             COALESCE(w.five_wickets, 0) AS five_wickets,
@@ -462,6 +471,64 @@ def get_best_bowling_figures(season=None, limit=10):
     return _fetch_all(query, (season, season, limit))
 
 
+def get_most_dot_balls_in_match(season=None, limit=10):
+    """
+    Return the top single-match dot-ball performances in IPL history
+    (excluding Super Overs). A dot ball is a legal delivery with 0 total runs.
+    """
+    _validate_limit(limit)
+    _validate_season(season)
+
+    query = """
+        SELECT
+            d.bowler_id AS player_id,
+            p.canonical_name AS player_name,
+            d.match_id,
+            m.season,
+            m.match_date,
+            COUNT(*) FILTER (
+                WHERE d.is_legal_ball = TRUE
+                  AND COALESCE(d.total_runs, 0) = 0
+            ) AS dot_balls,
+            COUNT(*) FILTER (WHERE d.is_legal_ball = TRUE) AS legal_balls,
+            SUM(
+                COALESCE(d.total_runs, 0)
+                - COALESCE(d.bye_runs, 0)
+                - COALESCE(d.leg_bye_runs, 0)
+                - COALESCE(d.penalty_runs, 0)
+            ) AS runs_conceded
+        FROM deliveries d
+        JOIN innings i
+            ON i.innings_id = d.innings_id
+        JOIN matches m
+            ON m.match_id = d.match_id
+        JOIN players p
+            ON p.player_id = d.bowler_id
+        WHERE
+            (%s::varchar IS NULL OR m.season = %s::varchar)
+            AND i.is_super_over = FALSE
+        GROUP BY
+            d.bowler_id,
+            p.canonical_name,
+            d.match_id,
+            m.season,
+            m.match_date
+        HAVING COUNT(*) FILTER (
+            WHERE d.is_legal_ball = TRUE
+              AND COALESCE(d.total_runs, 0) = 0
+        ) > 0
+        ORDER BY
+            dot_balls DESC,
+            legal_balls ASC,
+            runs_conceded ASC,
+            p.canonical_name ASC
+        LIMIT %s
+    """
+
+    normalized_season = season.strip() if season else None
+    return _fetch_all(query, (normalized_season, normalized_season, limit))
+
+
 def get_highest_individual_scores(season=None, limit=10):
     """Return top individual innings scores in IPL history (excluding Super Overs)."""
 
@@ -546,3 +613,61 @@ def get_highest_individual_scores(season=None, limit=10):
     """
 
     return _fetch_all(query, (season, season, limit))
+
+
+def get_most_dot_balls_in_match(season=None, limit=10):
+    """
+    Return the top single-match dot-ball performances in IPL history
+    (excluding Super Overs). A dot ball is a legal delivery with 0 total runs.
+    """
+    _validate_limit(limit)
+    _validate_season(season)
+
+    query = """
+        SELECT
+            d.bowler_id AS player_id,
+            p.canonical_name AS player_name,
+            d.match_id,
+            m.season,
+            m.match_date,
+            COUNT(*) FILTER (
+                WHERE d.is_legal_ball = TRUE
+                  AND COALESCE(d.total_runs, 0) = 0
+            ) AS dot_balls,
+            COUNT(*) FILTER (WHERE d.is_legal_ball = TRUE) AS legal_balls,
+            SUM(
+                COALESCE(d.total_runs, 0)
+                - COALESCE(d.bye_runs, 0)
+                - COALESCE(d.leg_bye_runs, 0)
+                - COALESCE(d.penalty_runs, 0)
+            ) AS runs_conceded
+        FROM deliveries d
+        JOIN innings i
+            ON i.innings_id = d.innings_id
+        JOIN matches m
+            ON m.match_id = d.match_id
+        JOIN players p
+            ON p.player_id = d.bowler_id
+        WHERE
+            (%s::varchar IS NULL OR m.season = %s::varchar)
+            AND i.is_super_over = FALSE
+        GROUP BY
+            d.bowler_id,
+            p.canonical_name,
+            d.match_id,
+            m.season,
+            m.match_date
+        HAVING COUNT(*) FILTER (
+            WHERE d.is_legal_ball = TRUE
+              AND COALESCE(d.total_runs, 0) = 0
+        ) > 0
+        ORDER BY
+            dot_balls DESC,
+            legal_balls ASC,
+            runs_conceded ASC,
+            p.canonical_name ASC
+        LIMIT %s
+    """
+
+    normalized_season = season.strip() if season else None
+    return _fetch_all(query, (normalized_season, normalized_season, limit))

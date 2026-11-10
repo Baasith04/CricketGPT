@@ -1,13 +1,17 @@
 
+import logging
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from app.api.error_logging import log_sanitized_exception
 from app.services.statistics.leaderboard_service import (
     get_batting_leaderboard,
     get_bowling_leaderboard,
     get_best_bowling_figures,
 )
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -42,12 +46,13 @@ def batting_leaderboard(
             min_balls=min_balls,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log_sanitized_exception(logger, "Error in GET /api/leaderboards/batting", exc)
         raise HTTPException(
             status_code=500,
             detail="Unable to retrieve batting leaderboard.",
-        )
+        ) from exc
 
 
 @router.get("/bowling")
@@ -58,6 +63,7 @@ def bowling_leaderboard(
         "average",
         "strike_rate",
         "five_wickets",
+        "dot_balls",
     ] = "wickets",
     season: Optional[str] = None,
     limit: int = Query(default=10, ge=1, le=100),
@@ -73,12 +79,13 @@ def bowling_leaderboard(
             min_balls=min_balls,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log_sanitized_exception(logger, "Error in GET /api/leaderboards/bowling", exc)
         raise HTTPException(
             status_code=500,
             detail="Unable to retrieve bowling leaderboard.",
-        )
+        ) from exc
 
 
 @router.get("/best-bowling")
@@ -94,9 +101,10 @@ def best_bowling_figures(
             limit=limit,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log_sanitized_exception(logger, "Error in GET /api/leaderboards/best-bowling", exc)
         raise HTTPException(
             status_code=500,
             detail="Unable to retrieve best bowling figures.",
-        )
+        ) from exc

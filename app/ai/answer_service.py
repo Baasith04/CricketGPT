@@ -1,5 +1,9 @@
 
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from app.ai.cutoff import (
     get_knowledge_cutoff_date,
@@ -23,6 +27,7 @@ from app.services.statistics.leaderboard_service import (
     get_bowling_leaderboard,
     get_best_bowling_figures,
     get_highest_individual_scores,
+    get_most_dot_balls_in_match,
 )
 from app.services.statistics.advanced_stats_service import (
     find_matches_by_filter,
@@ -116,6 +121,12 @@ def answer_leaderboard_question(
             limit=limit,
         )
 
+    elif question_type == "single_match_dot_balls":
+        rows = get_most_dot_balls_in_match(
+            season=season,
+            limit=limit,
+        )
+
     elif question_type == "bowling":
         kwargs = {
             "category": category,
@@ -150,8 +161,23 @@ def answer_leaderboard_question(
         "",
     ]
 
+    # Single-match dot balls
+    if question_type == "single_match_dot_balls":
+        lines.extend([
+            "Rank | Player | Season | Match ID | Dot Balls | Overs",
+            "--- | --- | --- | --- | ---: | ---:",
+        ])
+        for index, row in enumerate(rows, start=1):
+            legal_balls = int(row.get("legal_balls") or 0)
+            overs = f"{legal_balls // 6}.{legal_balls % 6}"
+            dot_balls = row.get("dot_balls") if row.get("dot_balls") is not None else 0
+            lines.append(
+                f"{index} | {row['player_name']} | {row['season']} | "
+                f"{row['match_id']} | {dot_balls} | {overs}"
+            )
+
     # Best bowling figures
-    if question_type == "best_bowling":
+    elif question_type == "best_bowling":
         lines.extend([
             "Rank | Player | Season | Match ID | Figures | Overs",
             "--- | --- | --- | --- | --- | ---:",
@@ -176,6 +202,7 @@ def answer_leaderboard_question(
             "average": ("Bowling average", "bowling_average"),
             "strike_rate": ("Bowling strike rate", "bowling_strike_rate"),
             "five_wickets": ("5-Wicket Hauls", "five_wickets"),
+            "dot_balls": ("Dot Balls", "dot_balls"),
         }
 
         label, field = bowling_columns.get(
@@ -1168,6 +1195,208 @@ def answer_match_by_date_question(
     return "\n".join(lines)
 
 
+def _format_human_match_date(raw_date: Any) -> str:
+    """Format a date object or YYYY-MM-DD string cleanly as '26 May 2024'."""
+    if raw_date is None:
+        return "N/A"
+    if isinstance(raw_date, datetime):
+        parsed = raw_date.date()
+    elif isinstance(raw_date, date):
+        parsed = raw_date
+    else:
+        text = str(raw_date).strip()
+        try:
+            parsed = date.fromisoformat(text[:10])
+        except ValueError:
+            return text or "N/A"
+    return f"{parsed.day} {parsed.strftime('%B %Y')}"
+
+
+def _format_venue_str(match_details: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Build concise venue + city string without duplicating the city name."""
+    if not match_details or not match_details.get("venue"):
+        return None
+    venue = str(match_details["venue"]).strip()
+    city = match_details.get("city")
+    if city and str(city).strip().lower() not in venue.lower():
+        return f"{venue}, {str(city).strip()}"
+    return venue
+
+
+def _safe_get_potm_match_context(
+    match_id: int,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Fetch match metadata and scorecard without failing POTM formatting if unavailable."""
+    details: Optional[Dict[str, Any]] = None
+    scorecard: Optional[Dict[str, Any]] = None
+    try:
+        details = get_match_details(match_id)
+    except Exception as exc:
+        logger.warning("Unable to fetch match details for POTM match_id=%s: %s", match_id, exc)
+    try:
+        scorecard = get_match_scorecard(match_id)
+    except Exception as exc:
+        logger.warning("Unable to fetch scorecard for POTM match_id=%s: %s", match_id, exc)
+    return details, scorecard
+
+
+def _match_player_entry(
+    entries: List[Dict[str, Any]],
+    player_id: Optional[str],
+    player_name: str,
+) -> Optional[Dict[str, Any]]:
+    """Find a player's scorecard row by player_id first, then case-insensitive name."""
+    target_name = player_name.strip().lower()
+    for entry in entries:
+        if player_id and entry.get("player_id") == player_id:
+            return entry
+    for entry in entries:
+        if str(entry.get("player_name", "")).strip().lower() == target_name:
+            return entry
+    return None
+
+
+def _format_player_batting_line(entry: Dict[str, Any]) -> Optional[str]:
+    """Format a player's batting figures when they faced a ball or scored runs."""
+    runs = int(entry.get("runs") or 0)
+    balls = int(entry.get("balls") or 0)
+    if balls == 0 and runs == 0:
+        return None
+    not_out_mark = "*" if not entry.get("is_out", True) else ""
+    parts = [f"{balls} balls" if balls != 1 else "1 ball"]
+    fours = int(entry.get("fours") or 0)
+    sixes = int(entry.get("sixes") or 0)
+    if fours:
+        parts.append(f"{fours}x4")
+    if sixes:
+        parts.append(f"{sixes}x6")
+    return f"Batting: {runs}{not_out_mark} ({', '.join(parts)})"
+
+
+def _format_player_bowling_line(entry: Dict[str, Any]) -> Optional[str]:
+    """Format a player's bowling figures when they bowled at least one legal ball."""
+    legal_balls = int(entry.get("legal_balls") or 0)
+    overs = entry.get("overs")
+    if legal_balls <= 0 and not overs:
+        return None
+    wickets = int(entry.get("wickets") or 0)
+    runs_conceded = int(entry.get("runs_conceded") or 0)
+    overs_text = overs or f"{legal_balls // 6}.{legal_balls % 6}"
+    econ = entry.get("economy")
+    detail = f"{overs_text} overs, econ {econ}" if econ is not None else f"{overs_text} overs"
+    return f"Bowling: {wickets}/{runs_conceded} ({detail})"
+
+
+def _extract_player_match_stats(
+    scorecard: Optional[Dict[str, Any]],
+    player_id: Optional[str],
+    player_name: str,
+) -> Optional[str]:
+    """Extract a POTM recipient's batting/bowling summary from a match scorecard."""
+    if not scorecard:
+        return None
+
+    innings_groups = [scorecard.get("innings") or [], scorecard.get("super_overs") or []]
+    for group in innings_groups:
+        bat_lines: List[str] = []
+        bowl_lines: List[str] = []
+        for inn in group:
+            bat_entry = _match_player_entry(inn.get("batting") or [], player_id, player_name)
+            if bat_entry:
+                formatted_bat = _format_player_batting_line(bat_entry)
+                if formatted_bat:
+                    bat_lines.append(formatted_bat)
+            bowl_entry = _match_player_entry(inn.get("bowling") or [], player_id, player_name)
+            if bowl_entry:
+                formatted_bowl = _format_player_bowling_line(bowl_entry)
+                if formatted_bowl:
+                    bowl_lines.append(formatted_bowl)
+        combined = bat_lines + bowl_lines
+        if combined:
+            return " | ".join(combined)
+    return None
+
+
+def _build_potm_match_detail_lines(
+    match_id: Optional[int],
+    season: Optional[str],
+    stage: Optional[str],
+    fixture: Optional[str],
+    raw_date: Any,
+    match_details: Optional[Dict[str, Any]],
+) -> List[str]:
+    """Build standardized match heading and metadata bullets displayed beneath POTM."""
+    details_teams = (match_details or {}).get("teams") or []
+    resolved_fixture = fixture or (
+        " vs ".join(t["team_name"] for t in details_teams if t.get("team_name")) or None
+    )
+    resolved_date = raw_date or (match_details or {}).get("match_date")
+    resolved_season = season or (match_details or {}).get("season")
+    resolved_stage = stage or (match_details or {}).get("stage")
+    venue_str = _format_venue_str(match_details)
+    result_summary = ((match_details or {}).get("result") or {}).get("summary")
+
+    if resolved_season and resolved_stage:
+        heading = f"**IPL {resolved_season} {resolved_stage}**"
+    elif resolved_season:
+        heading = f"**IPL {resolved_season} Match**"
+    elif resolved_stage:
+        heading = f"**IPL {resolved_stage}**"
+    else:
+        heading = "**Match Details**"
+
+    lines = [heading]
+    if resolved_fixture:
+        lines.append(f"- Match: {resolved_fixture}")
+    if resolved_date:
+        lines.append(f"- Date: {_format_human_match_date(resolved_date)}")
+    if venue_str:
+        lines.append(f"- Venue: {venue_str}")
+    if result_summary:
+        lines.append(f"- Result: {result_summary}")
+    if match_id is not None:
+        lines.append(f"- Match ID: {match_id}")
+    return lines
+
+
+def _format_missing_potm_response(
+    match_id: Optional[int],
+    season: Optional[str],
+    final_only: bool,
+) -> str:
+    """Return a clear, non-hallucinated message when POTM is unavailable in SQL."""
+    if match_id is not None:
+        details, _ = _safe_get_potm_match_context(match_id)
+        if details:
+            detail_lines = _build_potm_match_detail_lines(
+                match_id=match_id,
+                season=details.get("season"),
+                stage=details.get("stage"),
+                fixture=None,
+                raw_date=details.get("match_date"),
+                match_details=details,
+            )
+            return "\n".join([
+                f"Player of the Match information is unavailable in the database for Match {match_id} "
+                "(no Player of the Match award record was found).",
+                "",
+                *detail_lines,
+                "",
+                "Source: CricketGPT historical IPL database (Supabase).",
+            ])
+        return (
+            f"Player of the Match information is unavailable in the database for match {match_id} "
+            "(no Player of the Match award record found)."
+        )
+
+    if final_only and season:
+        return (
+            f"Player of the Match information is unavailable in the database for the IPL {season} Final "
+            "(no Player of the Match award record found)."
+        )
+    return "No Player of the Match records found in the database."
+
+
 def answer_match_awards_question(
     match_id: int = None,
     season: str = None,
@@ -1182,20 +1411,58 @@ def answer_match_awards_question(
         limit=limit,
     )
     if not rows:
-        if match_id:
-            return f"No Player of the Match record found for match {match_id}."
-        return "No Player of the Match records found."
+        return _format_missing_potm_response(
+            match_id=match_id,
+            season=season,
+            final_only=final_only,
+        )
 
     if match_id is not None or (final_only and season):
         first = rows[0]
-        recipients = ", ".join(r["player_name"] for r in rows)
-        return (
-            f"## Player of the Match — Match {first['match_id']} (IPL {first['season']})\n\n"
-            f"- **Fixture:** {first['teams']}\n"
-            f"- **Date:** {first['match_date']}\n"
-            f"- **Recipient:** **{recipients}**\n\n"
-            "Source: CricketGPT historical IPL database (Supabase)."
+        resolved_match_id = int(first["match_id"]) if first.get("match_id") is not None else match_id
+        recipients = ", ".join(r["player_name"] for r in rows if r.get("player_name"))
+        if not recipients:
+            return _format_missing_potm_response(
+                match_id=resolved_match_id,
+                season=season,
+                final_only=final_only,
+            )
+
+        match_details, scorecard = (
+            _safe_get_potm_match_context(resolved_match_id)
+            if resolved_match_id is not None
+            else (None, None)
         )
+        stage_val = first.get("stage") or (match_details or {}).get("stage") or ("Final" if final_only else None)
+        detail_lines = _build_potm_match_detail_lines(
+            match_id=resolved_match_id,
+            season=first.get("season") or season,
+            stage=stage_val,
+            fixture=first.get("teams"),
+            raw_date=first.get("match_date"),
+            match_details=match_details,
+        )
+
+        # Append each POTM recipient's team and match performance after match details.
+        multi = len(rows) > 1
+        for row in rows:
+            name = row["player_name"]
+            team = row.get("player_team")
+            perf = _extract_player_match_stats(scorecard, row.get("player_id"), name)
+            label_suffix = f" ({name})" if multi else ""
+            if team:
+                detail_lines.append(f"- Team{label_suffix}: {team}")
+            if perf:
+                detail_lines.append(f"- Performance{label_suffix}: {perf}")
+
+        lines = [
+            f"🏆 Player of the Match: **{recipients}**",
+            "",
+            *detail_lines,
+            "",
+            "Source: CricketGPT historical IPL database (Supabase).",
+        ]
+        return "\n".join(lines)
 
     scope = f" - IPL {season}" if season else " - All IPL seasons"
     lines = [
@@ -1210,6 +1477,43 @@ def answer_match_awards_question(
         "",
         "Source: CricketGPT historical IPL database (Supabase).",
     ])
+    return "\n".join(lines)
+
+
+def answer_versus_potm_question(
+    team_one: str,
+    team_two: str,
+    season: Optional[str] = None,
+) -> str:
+    """Resolve team-vs-team POTM query (single fixture directly, or list candidates)."""
+    try:
+        matches = find_matches_by_filter(
+            team_one=team_one,
+            team_two=team_two,
+            season=season,
+        )
+    except ValueError as exc:
+        return f"Match lookup error: {exc}"
+
+    if not matches:
+        scope = f" in IPL {season}" if season else ""
+        return f"No IPL matches found between {team_one} and {team_two}{scope}."
+
+    if len(matches) == 1:
+        return answer_match_awards_question(match_id=int(matches[0]["match_id"]))
+
+    lines = [
+        "Multiple matches matched those teams. Please specify the match date or Match ID for Player of the Match:",
+        "",
+        "| Match ID | Date | Teams | Winner | Venue |",
+        "|---:|---|---|---|---|",
+    ]
+    for m in matches[:10]:
+        lines.append(
+            f"| {m['match_id']} | {m['match_date']} | {m['teams']} | "
+            f"{m.get('winner') or 'No Result'} | {m.get('venue') or 'N/A'} |"
+        )
+    lines.extend(["", "Source: CricketGPT historical IPL database (Supabase)."])
     return "\n".join(lines)
 
 
