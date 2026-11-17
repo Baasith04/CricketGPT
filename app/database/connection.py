@@ -39,6 +39,16 @@ class DatabaseConnectionError(Exception):
     pass
 
 
+def _get_statement_timeout_seconds() -> int:
+    """Parse DB_STATEMENT_TIMEOUT in seconds (default 30s, 0 disables)."""
+    raw = os.getenv("DB_STATEMENT_TIMEOUT", "30").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Invalid DB_STATEMENT_TIMEOUT '%s'; defaulting to 30s.", raw)
+        return 30
+
+
 def get_database_url() -> str:
     """
     Retrieve and validate the DATABASE_URL environment variable.
@@ -211,6 +221,16 @@ def create_connection() -> psycopg.Connection:
             sslmode=details["effective_sslmode"],
             connect_timeout=details["connect_timeout"],
         )
+        statement_timeout_sec = _get_statement_timeout_seconds()
+        if statement_timeout_sec > 0:
+            try:
+                conn.execute(f"SET statement_timeout = {int(statement_timeout_sec * 1000)}")
+                conn.commit()
+            except Exception as set_exc:
+                logger.warning(
+                    "Could not configure statement_timeout (%s); using database default.",
+                    set_exc,
+                )
         return conn
     except psycopg.OperationalError as exc:
         _log_and_raise_connection_error(

@@ -20,6 +20,12 @@ openai==3.48.0
 pgvector==0.5.1
 pypdf==7.0.0
 
+# LangChain integration (retry, fallback, tool calling, multi-model orchestration)
+langchain-core==1.8.1
+langchain-groq==1.2.0
+langchain-google-genai==4.5.0
+langchain-mistralai==1.2.0
+
 # Testing & HTTP client
 pytest==9.2.0
 pytest-asyncio==1.4.1.post1

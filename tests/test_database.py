@@ -194,3 +194,22 @@ def test_service_health_remains_independent(client: TestClient):
         assert response.status_code == 200
         assert response.json()["status"] == "healthy"
 
+
+def test_statement_timeout_applied_on_connection():
+    """create_connection executes SET statement_timeout when configured."""
+    from app.database.connection import _get_statement_timeout_seconds
+
+    with patch.dict("os.environ", {"DB_STATEMENT_TIMEOUT": "20"}):
+        assert _get_statement_timeout_seconds() == 20
+
+    with patch.dict("os.environ", {"DB_STATEMENT_TIMEOUT": "invalid"}):
+        assert _get_statement_timeout_seconds() == 30  # default
+
+    mock_conn = MagicMock()
+    with patch.dict("os.environ", {"DATABASE_URL": "postgresql://u:p@localhost:5432/db", "DB_STATEMENT_TIMEOUT": "25"}):
+        with patch("app.database.connection.psycopg.connect", return_value=mock_conn):
+            conn = create_connection()
+            assert conn == mock_conn
+            mock_conn.execute.assert_called_once_with("SET statement_timeout = 25000")
+            mock_conn.commit.assert_called_once()
+
