@@ -1,8 +1,10 @@
 """Tests for API rate limiting (multi-worker/Redis) and RAG validation bounds."""
 
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from starlette.testclient import TestClient
@@ -15,6 +17,7 @@ from app.api.rate_limit import (
     reset_rate_limiter,
     resolve_storage_uri,
 )
+from app.core.security import AuthenticatedUser, get_current_user
 from app.main import app
 from app.rag.embeddings.embedder import DailyQuotaExhaustedError
 
@@ -22,8 +25,15 @@ from app.rag.embeddings.embedder import DailyQuotaExhaustedError
 @pytest.fixture
 def client():
     reset_rate_limiter()
+    mock_user = AuthenticatedUser(
+        id=uuid.uuid4(),
+        email="test@cricketgpt.com",
+        role="authenticated",
+    )
+    app.dependency_overrides[get_current_user] = lambda: mock_user
     with TestClient(app) as c:
         yield c
+    app.dependency_overrides.pop(get_current_user, None)
     reset_rate_limiter()
 
 

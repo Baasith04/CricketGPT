@@ -444,12 +444,25 @@ def reset_rate_limiter() -> None:
             clear_fn = getattr(backend, "clear", None)
             if callable(clear_fn):
                 clear_fn()
+        default_path = Path(tempfile.gettempdir()) / "cricketgpt_ratelimit.sqlite3"
+        if default_path.exists():
+            try:
+                SQLiteFixedWindowBackend(default_path).clear()
+            except Exception:
+                pass
         _cached_uri = None
         _cached_backend = None
         _fallback_sqlite = None
 
 
-def check_rate_limit(bucket: str, env_var: str, default_spec: str, request: Request, response: Response) -> None:
+def check_rate_limit(
+    bucket: str,
+    env_var: str,
+    default_spec: str,
+    request: Request,
+    response: Response,
+    user_id: Optional[Union[str, object]] = None,
+) -> None:
     """Enforce configured fixed-window rate limit for a request."""
     if not is_rate_limiting_enabled():
         return
@@ -461,8 +474,19 @@ def check_rate_limit(bucket: str, env_var: str, default_spec: str, request: Requ
         logger.warning("Invalid %s='%s'; falling back to %s.", env_var, raw_spec, default_spec)
         limit, window_seconds = parse_rate_limit(default_spec)
 
-    client_ip = get_client_ip(request)
-    key = f"{bucket}:{client_ip}"
+    # Key rate limit by authenticated user UUID if available; fallback safely to client IP
+    resolved_user_id = user_id
+    if not resolved_user_id and hasattr(request, "state"):
+        user = getattr(request.state, "user", None)
+        if user:
+            resolved_user_id = getattr(user, "id", None)
+
+    if resolved_user_id:
+        key = f"{bucket}:user:{resolved_user_id}"
+    else:
+        client_ip = get_client_ip(request)
+        key = f"{bucket}:{client_ip}"
+
     backend = _get_backend()
 
     try:

@@ -1,18 +1,27 @@
 """API tests for POST /api/chat and /api/leaderboards/* endpoints."""
 
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 from starlette.testclient import TestClient
 
+from app.core.security import AuthenticatedUser, get_current_user
 from app.database.connection import DatabaseConnectionError
 from app.main import app
 
 
 @pytest.fixture
 def client():
+    mock_user = AuthenticatedUser(
+        id=UUID("00000000-0000-0000-0000-000000000001"),
+        email="test@cricketgpt.com",
+        role="authenticated",
+    )
+    app.dependency_overrides[get_current_user] = lambda: mock_user
     with TestClient(app) as c:
         yield c
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from app.api.routes.chat import router as chat_router
+from app.api.routes.conversations import router as conversations_router
 from app.api.routes.leaderboards import router as leaderboard_router
 from app.api.routes.matches import router as matches_router
 from app.api.routes.players import router as players_router
@@ -106,6 +107,7 @@ def create_app() -> FastAPI:
     cors_cfg = build_cors_config()
     application.add_middleware(CORSMiddleware, **cors_cfg)
     application.include_router(chat_router)
+    application.include_router(conversations_router)
     application.include_router(leaderboard_router)
     application.include_router(matches_router)
     application.include_router(players_router)

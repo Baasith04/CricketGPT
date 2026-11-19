@@ -6,6 +6,8 @@
  * them to VITE_API_BASE_URL without triggering cross-origin CORS blocks.
  */
 
+import { supabase } from "./supabase";
+
 const ENV_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "")
   .trim()
   .replace(/\/+$/, "");
@@ -65,26 +67,164 @@ export async function checkBackendHealth() {
 }
 
 /**
+ * Helper to get authenticated headers with current Supabase Bearer access token.
+ */
+async function getAuthHeaders() {
+  const {
+    data: { session },
+    error: sessionError,
+  } = await supabase.auth.getSession();
+
+  if (sessionError || !session?.access_token) {
+    throw new Error(
+      "Your session has expired or you are not signed in. Please sign in to continue."
+    );
+  }
+
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${session.access_token}`,
+  };
+}
+
+/**
+ * listConversations — GET /api/conversations
+ * Lists all conversations for the authenticated user.
+ */
+export async function listConversations() {
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${BASE_URL}/api/conversations`, {
+    method: "GET",
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error("Failed to load conversations.");
+  }
+  return await response.json();
+}
+
+/**
+ * getConversation — GET /api/conversations/{conversation_id}
+ * Retrieves a conversation and its messages.
+ */
+export async function getConversation(conversationId) {
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${BASE_URL}/api/conversations/${conversationId}`, {
+    method: "GET",
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error("Failed to load conversation details.");
+  }
+  return await response.json();
+}
+
+/**
+ * createConversation — POST /api/conversations
+ * Creates a new conversation.
+ */
+export async function createConversation(title = null) {
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${BASE_URL}/api/conversations`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to create conversation.");
+  }
+  return await response.json();
+}
+
+/**
+ * updateConversationTitle — PATCH /api/conversations/{conversation_id}
+ * Updates conversation title.
+ */
+export async function updateConversationTitle(conversationId, title) {
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${BASE_URL}/api/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ title }),
+  });
+  if (!response.ok) {
+    throw new Error("Failed to update conversation title.");
+  }
+  return await response.json();
+}
+
+/**
+ * deleteConversation — DELETE /api/conversations/{conversation_id}
+ * Deletes a conversation and its messages.
+ */
+export async function deleteConversation(conversationId) {
+  const headers = await getAuthHeaders();
+  const response = await fetch(`${BASE_URL}/api/conversations/${conversationId}`, {
+    method: "DELETE",
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error("Failed to delete conversation.");
+  }
+  return await response.json();
+}
+
+/**
  * sendChatMessage — POST /api/chat
  *
  * Matches FastAPI schema:
- *   ChatRequest:  { question: string (1–500 chars) }
- *   ChatResponse: { question: string, answer: string }
+ *   ChatRequest:  { question: string, conversation_id?: UUID, conversation_history?: [...] }
+ *   ChatResponse: { question: string, answer: string, conversation_id?: UUID }
  *
  * @param {string} question
- * @returns {Promise<{ question: string, answer: string }>}
+ * @param {string|null} [conversationId=null]
+ * @param {Array<{ role: string, content: string, isError?: boolean }>} [conversationHistory=[]]
+ * @returns {Promise<{ question: string, answer: string, conversation_id?: string }>}
  * @throws Error with a human-readable `.message`
  */
-export async function sendChatMessage(question) {
+export async function sendChatMessage(
+  question,
+  conversationId = null,
+  conversationHistory = []
+) {
+  // Retrieve the current Supabase session access token before making request
+  const {
+    data: { session },
+    error: sessionError,
+  } = await supabase.auth.getSession();
+
+  if (sessionError || !session?.access_token) {
+    throw new Error(
+      "Your session has expired or you are not signed in. Please sign in to continue."
+    );
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  const payload = { question };
+  if (conversationId) {
+    payload.conversation_id = conversationId;
+  }
+  if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
+    payload.conversation_history = conversationHistory
+      .filter((m) => !m.isError && m.content)
+      .slice(-6)
+      .map((m) => ({
+        role: m.role === "bot" ? "assistant" : m.role,
+        content: m.content,
+      }));
+  }
 
   let response;
   try {
     response = await fetch(`${BASE_URL}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
   } catch (err) {
@@ -103,6 +243,12 @@ export async function sendChatMessage(question) {
   if (isRenderSleeping(response.status)) {
     throw new Error(
       "The server is waking up from sleep. Please try again in 15–30 seconds."
+    );
+  }
+
+  if (response.status === 401) {
+    throw new Error(
+      "Authentication error: Your session has expired or is invalid. Please sign in again."
     );
   }
 
